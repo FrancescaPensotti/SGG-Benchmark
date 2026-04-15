@@ -75,6 +75,12 @@ def main(args):
 
         # Make prediction
         img, graph = model.predict(frame, visu_type=visu_type)
+        
+
+        bboxes_dbg, rels_dbg = model.predict(frame)  # senza visu_type = dati grezzi
+        if rels_dbg is not None and len(rels_dbg) > 0:
+            for rel in rels_dbg[:3]:
+                print(f"rel: {rel}")
 
         # model.predict returns images in BGR for visualization (OpenCV native)
         # So we can display them directly.
