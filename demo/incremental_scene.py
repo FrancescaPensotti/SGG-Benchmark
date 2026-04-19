@@ -104,15 +104,136 @@ def update_scene_graph(image, bboxes, rels):
                 if rel_tuple not in scene_graph[subj_node]['relazioni']:
                     scene_graph[subj_node]['relazioni'].append(rel_tuple)
 
+# def print_scene_graph():
+#     """Stampa lo stato attuale dell'albero semantico."""
+#     print("\n" + "="*50)
+#     print(f"ALBERO SEMANTICO — {len(scene_graph)} oggetti nella scena")
+#     print("="*50)
+#     for i, node in enumerate(scene_graph):
+#         print(f"  [{i}] {node['label']} (visto {node['count']} volte)")
+#         for pred, obj_idx in node['relazioni']:
+#             print(f"       --({pred})--> {scene_graph[obj_idx]['label']}")
+#     print("="*50 + "\n")
+
+# ══════════════════════════════════════════════════════════════
+# ALTERNATIVA — Formato JSON stile MomaGraph
+# Commenta/decommenta per passare da un formato all'altro
+# ══════════════════════════════════════════════════════════════
+
+# VERSIONE ATTIVA: formato testuale SGG-Benchmark
+# def print_scene_graph():
+#     """Stampa l'albero in formato testuale semplice."""
+#     print("\n" + "="*50)
+#     print(f"ALBERO SEMANTICO — {len(scene_graph)} oggetti nella scena")
+#     print("="*50)
+#     for i, node in enumerate(scene_graph):
+#         print(f"  [{i}] {node['label']} (visto {node['count']} volte)")
+#         for pred, obj_idx in node['relazioni']:
+#             print(f"       --({pred})--> {scene_graph[obj_idx]['label']}")
+#     print("="*50 + "\n")
+
+# ──────────────────────────────────────────────────────────────
+# VERSIONE COMMENTATA: formato JSON stile MomaGraph
+# Per attivarla: commenta la funzione sopra e decommenta questa
+# ──────────────────────────────────────────────────────────────
+
+# RELAZIONI FUNZIONALI disponibili in MomaGraph:
+# "openorclose", "adjust", "control", "providepower",
+# "activate", "pairwith"
+#
+# RELAZIONI SPAZIALI disponibili in MomaGraph:
+# "left_of", "right_of", "in_front_of", "behind",
+# "higher_than", "lower_than", "close", "far", "touching"
+#
+# FUNCTION_TYPES disponibili:
+# "parameter_adjustment", "device_control", "open_close_control",
+# "water_flow_control", "power_supply", "special_function", "assembly"
+#
+# ACTION_TYPES disponibili:
+# "press", "rotate", "pull", "open", "push", "close", "insert"
+
+# MAPPA relazioni VG150 → relazioni funzionali MomaGraph
+# Usata per convertire le relazioni di SGG-Benchmark nel formato MomaGraph
+VG_TO_FUNCTIONAL = {
+    'holding':      'control',
+    'using':        'control',
+    'carrying':     'control',
+    'attached to':  'pairwith',
+    'connected to': 'pairwith',
+    'hanging from': 'pairwith',
+    'plugged into': 'providepower',
+    'covering':     'openorclose',
+    'on':           'pairwith',
+    'in':           'pairwith',
+}
+
+# MAPPA relazioni VG150 → relazioni spaziali MomaGraph
+VG_TO_SPATIAL = {
+    'above':    'higher_than',
+    'below':    'lower_than',
+    'behind':   'behind',
+    'in front of': 'in_front_of',
+    'left of':  'left_of',
+    'right of': 'right_of',
+    'near':     'close',
+    'next to':  'close',
+    'on':       'touching',
+    'in':       'touching',
+    'touching': 'touching',
+}
+
 def print_scene_graph():
-    """Stampa lo stato attuale dell'albero semantico."""
-    print("\n" + "="*50)
-    print(f"ALBERO SEMANTICO — {len(scene_graph)} oggetti nella scena")
-    print("="*50)
+    """Stampa l'albero in formato JSON stile MomaGraph."""
+    import json
+
+    nodes = [node['label'] for node in scene_graph]
+
+    edges = []
     for i, node in enumerate(scene_graph):
-        print(f"  [{i}] {node['label']} (visto {node['count']} volte)")
         for pred, obj_idx in node['relazioni']:
-            print(f"       --({pred})--> {scene_graph[obj_idx]['label']}")
+
+            # Converti la relazione VG150 in funzionale o spaziale
+            functional = VG_TO_FUNCTIONAL.get(pred, None)
+            spatial = VG_TO_SPATIAL.get(pred, None)
+
+            edge = {
+                "object1": node['label'],
+                "object2": scene_graph[obj_idx]['label'],
+            }
+
+            if functional:
+                edge["functional_relationship"] = functional
+            if spatial:
+                edge["spatial_relations"] = [spatial]
+
+            # is_touching: True se la relazione implica contatto fisico
+            edge["is_touching"] = pred in ['holding', 'on', 'in',
+                                           'attached to', 'touching',
+                                           'covering', 'plugged into']
+
+            edges.append(edge)
+
+    # Rimuovi duplicati negli archi
+    unique_edges = []
+    seen = set()
+    for e in edges:
+        key = (e['object1'], e.get('functional_relationship',''),
+               e['object2'])
+        if key not in seen:
+            seen.add(key)
+            unique_edges.append(e)
+
+    # Costruisci il JSON finale stile MomaGraph
+    momagraph_json = {
+        "nodes": list(set(nodes)),  # rimuovi nodi duplicati
+        "edges": unique_edges,
+        "n_objects_seen": len(scene_graph),
+    }
+
+    print("\n" + "="*50)
+    print("SCENE GRAPH — Formato MomaGraph")
+    print("="*50)
+    print(json.dumps(momagraph_json, indent=2))
     print("="*50 + "\n")
 
 # ── Loop principale ─────────────────────────────────────────
