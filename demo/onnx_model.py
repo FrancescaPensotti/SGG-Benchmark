@@ -206,7 +206,7 @@ class SGG_ONNX_Model(SGG_Model):
         else:
             # Fallback for old export or partial export
             print("Error: ONNX model does not have expected SGG outputs. Please re-export the full model.")
-            return out_img, None
+            return out_img, rels
 
         # update tracker
         if self.tracking and len(bboxes) > 0:
@@ -236,7 +236,7 @@ class SGG_ONNX_Model(SGG_Model):
                 cv2.putText(out_img, text, pos, cv2.FONT_HERSHEY_SIMPLEX, font_scale, (50, 255, 50), 2, cv2.LINE_AA)
             
             # The out_img is BGR (since image was BGR and we use OpenCV to draw)
-            return out_img, None
+            return out_img, (bboxes, rels)
         
         elif visu_type == 'image':
             graph_img = self.visualize_graph(rels, bboxes)

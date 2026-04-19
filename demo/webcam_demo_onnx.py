@@ -74,13 +74,20 @@ def main(args):
             break
 
         # Make prediction
-        img, graph = model.predict(frame, visu_type=visu_type)
-        
-
-        bboxes_dbg, rels_dbg = model.predict(frame)  # senza visu_type = dati grezzi
-        if rels_dbg is not None and len(rels_dbg) > 0:
-            for rel in rels_dbg[:3]:
-                print(f"rel: {rel}")
+        img, dbg = model.predict(frame, visu_type=visu_type)
+        if dbg is not None:
+            bboxes_dbg, rels_dbg = dbg
+            if rels_dbg is not None and len(rels_dbg) > 0:
+                for rel in rels_dbg[:3]:
+                    subj_box_idx = int(rel[0])
+                    obj_box_idx = int(rel[1])
+                    rel_idx = int(rel[2])
+                    subj_cls = int(bboxes_dbg[subj_box_idx][5])
+                    obj_cls = int(bboxes_dbg[obj_box_idx][5])
+                    subj = model.stats['obj_classes'].get(subj_cls, subj_cls)
+                    obj = model.stats['obj_classes'].get(obj_cls, obj_cls)
+                    pred = model.stats['rel_classes'].get(rel_idx, rel_idx)
+                    print(f"{subj} --({pred})--> {obj}")
 
         # model.predict returns images in BGR for visualization (OpenCV native)
         # So we can display them directly.
