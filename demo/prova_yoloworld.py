@@ -4,7 +4,7 @@ from ultralytics import YOLOWorld
 model = YOLOWorld("yolov8s-world.pt")
 
 # Definisci gli oggetti che vuoi trovare con testo libero
-model.set_classes(["chair"])
+model.set_classes(["chair","person","cup","laptop"])
 
 # Esegui su un'immagine
 results = model("demo/example.jpg")
