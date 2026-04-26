@@ -71,10 +71,16 @@ def update_scene_graph(image, bboxes, rels):
 
         existing_idx = find_existing_node(label, embedding)
         
+        # Calcola il centroide del bounding box in pixel. origine alto a sx
+        x1, y1, x2, y2 = map(int, box[:4])
+        cx = int((x1 + x2) / 2)
+        cy = int((y1 + y2) / 2)
+
         if existing_idx >= 0:
             # Oggetto gia visto — aggiorna il nodo esistente
             scene_graph[existing_idx]['count'] += 1
             scene_graph[existing_idx]['embedding'] = embedding  # aggiorna embedding
+            scene_graph[existing_idx]['position'] = (cx, cy)   # aggiorna posizione
             box_to_node[i] = existing_idx
         else:
             # Oggetto nuovo — crea un nodo nuovo
@@ -82,7 +88,8 @@ def update_scene_graph(image, bboxes, rels):
                 'label': label,
                 'embedding': embedding,
                 'relazioni': [],
-                'count': 1
+                'count': 1,
+                'position': (cx, cy)  # posizione in pixel (x, y) dal frame webcam
             }
             scene_graph.append(new_node)
             box_to_node[i] = len(scene_graph) - 1
@@ -104,7 +111,8 @@ def update_scene_graph(image, bboxes, rels):
                 if rel_tuple not in scene_graph[subj_node]['relazioni']:
                     scene_graph[subj_node]['relazioni'].append(rel_tuple)
 
-# TOLGO COOMENTO PER SGG+CLIP 
+# ══════════════════════════════════════════════════════════════
+# VERSIONE 1: SGG + CLIP - INIZIO
 
 def print_scene_graph():
     """Stampa lo stato attuale dell'albero semantico."""
@@ -112,19 +120,26 @@ def print_scene_graph():
     print(f"ALBERO SEMANTICO — {len(scene_graph)} oggetti nella scena")
     print("="*50)
     for i, node in enumerate(scene_graph):
-        print(f"  [{i}] {node['label']} (visto {node['count']} volte)")
+        pos = node.get('position', 'N/A')
+        print(f"  [{i}] {node['label']} (visto {node['count']} volte) — pos: {pos}")
         for pred, obj_idx in node['relazioni']:
             print(f"       --({pred})--> {scene_graph[obj_idx]['label']}")
     print("="*50 + "\n")
+
+# VERSIONE 1: SGG + CLIP - FINE
+# ══════════════════════════════════════════════════════════════
+
+
 
 
 
 # ══════════════════════════════════════════════════════════════
 # ALTERNATIVA — Formato JSON stile MomaGraph
-# Commenta/decommenta per passare da un formato all'altro
 # ══════════════════════════════════════════════════════════════
 
-# VERSIONE ATTIVA: formato testuale SGG-Benchmark
+# VERSIONE 2: MomaGraph-INIZIO
+# ══════════════════════════════════════════════════════════════
+
 # def print_scene_graph():
 #     """Stampa l'albero in formato testuale semplice."""
 #     print("\n" + "="*50)
@@ -186,7 +201,6 @@ VG_TO_SPATIAL = {
     'touching': 'touching',
 }
 
-# COMMENTO QUI PER PASSARE A SGG+CLIP
 # def print_scene_graph():
 #     """Stampa l'albero in formato JSON stile MomaGraph."""
 #     import json
@@ -241,7 +255,10 @@ VG_TO_SPATIAL = {
 #     print(json.dumps(momagraph_json, indent=2))
 #     print("="*50 + "\n")
 
-# # 
+# VERSIONE 2:MomaGraph-FINE
+# ══════════════════════════════════════════════════════════════
+
+
 
 # ── Loop principale ─────────────────────────────────────────
 cap = cv2.VideoCapture(0)
