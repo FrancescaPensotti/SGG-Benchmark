@@ -5,12 +5,43 @@ import numpy as np
 from PIL import Image
 import sys
 import os
+from query_scene import get_position_history, get_current_position
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from demo.onnx_model import SGG_ONNX_Model
 
 # ── Configurazione ──────────────────────────────────────────
 ONNX_PATH = "checkpoints/VG150/react++_yolov8m/model.onnx"
 SIMILARITY_THRESHOLD = 0.85  # soglia per considerare due oggetti "lo stesso"
+FREQ_THRESHOLD = 10           # relazione deve essere vista almeno N volte
+
+# ── Mappe relazioni VG150 → MomaGraph ───────────────────────
+# Sempre attive, usate dal filtro relazioni
+VG_TO_FUNCTIONAL = {
+    'holding':      'control',
+    'using':        'control',
+    'carrying':     'control',
+    'attached to':  'pairwith',
+    'connected to': 'pairwith',
+    'hanging from': 'pairwith',
+    'plugged into': 'providepower',
+    'covering':     'openorclose',
+    'on':           'pairwith',
+    'in':           'pairwith',
+}
+
+VG_TO_SPATIAL = {
+    'above':       'higher_than',
+    'below':       'lower_than',
+    'behind':      'behind',
+    'in front of': 'in_front_of',
+    'left of':     'left_of',
+    'right of':    'right_of',
+    'near':        'close',
+    'next to':     'close',
+    'on':          'touching',
+    'in':          'touching',
+    'touching':    'touching',
+}
 
 # ── Carica i modelli ────────────────────────────────────────
 print("Carico SGG-Benchmark...")
@@ -25,8 +56,9 @@ print(f"Pronti! Uso: {device}")
 # Struttura: lista di nodi, ognuno con:
 # - label: nome dell'oggetto
 # - embedding: vettore CLIP 512D
-# - relazioni: lista di (relazione, idx_altro_nodo)
+# - relazioni: dizionario (pred, obj_node) -> count
 # - count: quante volte lo abbiamo visto
+# - position: centroide bounding box (cx, cy) in pixel
 scene_graph = []
 
 def get_clip_embedding(image, box):
@@ -57,7 +89,6 @@ def find_existing_node(label, embedding):
 
 def update_scene_graph(image, bboxes, rels):
     """Aggiorna l'albero semantico con le nuove osservazioni."""
-    # Mappa: idx bounding box -> idx nodo nell'albero
     box_to_node = {}
 
     # 1. Per ogni oggetto rilevato, aggiorna o crea un nodo
@@ -71,25 +102,24 @@ def update_scene_graph(image, bboxes, rels):
 
         existing_idx = find_existing_node(label, embedding)
         
-        # Calcola il centroide del bounding box in pixel. origine alto a sx
         x1, y1, x2, y2 = map(int, box[:4])
         cx = int((x1 + x2) / 2)
         cy = int((y1 + y2) / 2)
 
         if existing_idx >= 0:
-            # Oggetto gia visto — aggiorna il nodo esistente
             scene_graph[existing_idx]['count'] += 1
-            scene_graph[existing_idx]['embedding'] = embedding  # aggiorna embedding
-            scene_graph[existing_idx]['position'] = (cx, cy)   # aggiorna posizione
+            scene_graph[existing_idx]['embedding'] = embedding
+            scene_graph[existing_idx]['position'] = (cx, cy)
+            scene_graph[existing_idx]['position_history'].append((cx, cy))
             box_to_node[i] = existing_idx
         else:
-            # Oggetto nuovo — crea un nodo nuovo
             new_node = {
                 'label': label,
                 'embedding': embedding,
-                'relazioni': [],
+                'relazioni': {},  # dizionario: (pred, obj_node) -> count
                 'count': 1,
-                'position': (cx, cy)  # posizione in pixel (x, y) dal frame webcam
+                'position': (cx, cy),
+                'position_history': [(cx, cy)]
             }
             scene_graph.append(new_node)
             box_to_node[i] = len(scene_graph) - 1
@@ -106,31 +136,37 @@ def update_scene_graph(image, bboxes, rels):
                 subj_node = box_to_node[subj_box]
                 obj_node = box_to_node[obj_box]
                 
-                # Aggiungi relazione se non esiste gia
-                rel_tuple = (pred, obj_node)
-                if rel_tuple not in scene_graph[subj_node]['relazioni']:
-                    scene_graph[subj_node]['relazioni'].append(rel_tuple)
+                rel_key = (pred, obj_node)
+                if rel_key in scene_graph[subj_node]['relazioni']:
+                    scene_graph[subj_node]['relazioni'][rel_key] += 1
+                else:
+                    scene_graph[subj_node]['relazioni'][rel_key] = 1
 
 # ══════════════════════════════════════════════════════════════
 # VERSIONE 1: SGG + CLIP - INIZIO
 
-# #def print_scene_graph():
-#     """Stampa lo stato attuale dell'albero semantico."""
-#     print("\n" + "="*50)
-#     print(f"ALBERO SEMANTICO — {len(scene_graph)} oggetti nella scena")
-#     print("="*50)
-#     for i, node in enumerate(scene_graph):
-#         pos = node.get('position', 'N/A')
-#         print(f"  [{i}] {node['label']} (visto {node['count']} volte) — pos: {pos}")
-#         for pred, obj_idx in node['relazioni']:
-#             print(f"       --({pred})--> {scene_graph[obj_idx]['label']}")
-#     print("="*50 + "\n")
+def print_scene_graph():
+    """Stampa lo stato attuale dell'albero semantico con filtro frequenza + mappa."""
+    print("\n" + "="*50)
+    print(f"ALBERO SEMANTICO — {len(scene_graph)} oggetti nella scena")
+    print("="*50)
+    for i, node in enumerate(scene_graph):
+        pos = node.get('position', 'N/A')
+        history = node.get('position_history', [])
+        print(f"  [{i}] {node['label']} (visto {node['count']} volte) — pos attuale: {pos} — storia: {len(history)} punti")
+        for (pred, obj_idx), count in node['relazioni'].items():
+            # Filtro 1: frequenza minima
+            if count < FREQ_THRESHOLD:
+                continue
+            # Filtro 2: deve avere significato funzionale o spaziale
+            if pred not in VG_TO_FUNCTIONAL and pred not in VG_TO_SPATIAL:
+                continue
+            print(f"       --({pred})--> {scene_graph[obj_idx]['label']} [vista {count}x]")
+    print("="*50 + "\n")
+    
 
 # VERSIONE 1: SGG + CLIP - FINE
 # ══════════════════════════════════════════════════════════════
-
-
-
 
 
 # ══════════════════════════════════════════════════════════════
@@ -140,124 +176,88 @@ def update_scene_graph(image, bboxes, rels):
 # VERSIONE 2: MomaGraph-INIZIO
 # ══════════════════════════════════════════════════════════════
 
-def print_scene_graph():
-    """Stampa l'albero in formato testuale semplice."""
-    print("\n" + "="*50)
-    print(f"ALBERO SEMANTICO — {len(scene_graph)} oggetti nella scena")
-    print("="*50)
-    for i, node in enumerate(scene_graph):
-        print(f"  [{i}] {node['label']} (visto {node['count']} volte)")
-        for pred, obj_idx in node['relazioni']:
-            print(f"       --({pred})--> {scene_graph[obj_idx]['label']}")
-    print("="*50 + "\n")
-
-# ──────────────────────────────────────────────────────────────
-# VERSIONE COMMENTATA: formato JSON stile MomaGraph
-# Per attivarla: commenta la funzione sopra e decommenta questa
-# ──────────────────────────────────────────────────────────────
-
 # RELAZIONI FUNZIONALI disponibili in MomaGraph:
 # "openorclose", "adjust", "control", "providepower",
 # "activate", "pairwith"
-
+#
 # RELAZIONI SPAZIALI disponibili in MomaGraph:
 # "left_of", "right_of", "in_front_of", "behind",
 # "higher_than", "lower_than", "close", "far", "touching"
-
+#
 # FUNCTION_TYPES disponibili:
 # "parameter_adjustment", "device_control", "open_close_control",
 # "water_flow_control", "power_supply", "special_function", "assembly"
-
+#
 # ACTION_TYPES disponibili:
 # "press", "rotate", "pull", "open", "push", "close", "insert"
 
-# MAPPA relazioni VG150 → relazioni funzionali MomaGraph
-# Usata per convertire le relazioni di SGG-Benchmark nel formato MomaGraph
-VG_TO_FUNCTIONAL = {
-    'holding':      'control',
-    'using':        'control',
-    'carrying':     'control',
-    'attached to':  'pairwith',
-    'connected to': 'pairwith',
-    'hanging from': 'pairwith',
-    'plugged into': 'providepower',
-    'covering':     'openorclose',
-    'on':           'pairwith',
-    'in':           'pairwith',
-}
+# def print_scene_graph():
+#     """Stampa l'albero in formato JSON stile MomaGraph."""
+#     import json
+#
+#     nodes = [node['label'] for node in scene_graph]
+#
+#     edges = []
+#     for i, node in enumerate(scene_graph):
+#         for (pred, obj_idx), count in node['relazioni'].items():
+#             # Filtro 1: frequenza minima
+#             if count < FREQ_THRESHOLD:
+#                 continue
+#             # Filtro 2: deve avere significato funzionale o spaziale
+#             if pred not in VG_TO_FUNCTIONAL and pred not in VG_TO_SPATIAL:
+#                 continue
+#
+#             functional = VG_TO_FUNCTIONAL.get(pred, None)
+#             spatial = VG_TO_SPATIAL.get(pred, None)
+#
+#             edge = {
+#                 "object1": node['label'],
+#                 "object2": scene_graph[obj_idx]['label'],
+#             }
+#
+#             if functional:
+#                 edge["functional_relationship"] = functional
+#             if spatial:
+#                 edge["spatial_relations"] = [spatial]
+#
+#             edge["is_touching"] = pred in ['holding', 'on', 'in',
+#                                            'attached to', 'touching',
+#                                            'covering', 'plugged into']
+#             edges.append(edge)
+#
+#     unique_edges = []
+#     seen = set()
+#     for e in edges:
+#         key = (e['object1'], e.get('functional_relationship',''),
+#                e['object2'])
+#         if key not in seen:
+#             seen.add(key)
+#             unique_edges.append(e)
+#
+#    # Posizioni attuali e storia di ogni oggetto
+#     positions = {}
+#     for node in scene_graph:
+#         if node['count'] >= FREQ_THRESHOLD and node.get('position'):
+#             positions[node['label']] = {
+#                 "current": list(node['position']),
+#                 "history": [list(p) for p in node.get('position_history', [])]
+#             }
+#
+#     momagraph_json = {
+#         "nodes": list(set(nodes)),
+#         "edges": unique_edges,
+#         "n_objects_seen": len(scene_graph),
+#         "positions": positions,
+#     }
+#
+#     print("\n" + "="*50)
+#     print("SCENE GRAPH — Formato MomaGraph")
+#     print("="*50)
+#     print(json.dumps(momagraph_json, indent=2))
+#     print("="*50 + "\n")
 
-# MAPPA relazioni VG150 → relazioni spaziali MomaGraph
-VG_TO_SPATIAL = {
-    'above':    'higher_than',
-    'below':    'lower_than',
-    'behind':   'behind',
-    'in front of': 'in_front_of',
-    'left of':  'left_of',
-    'right of': 'right_of',
-    'near':     'close',
-    'next to':  'close',
-    'on':       'touching',
-    'in':       'touching',
-    'touching': 'touching',
-}
-
-def print_scene_graph():
-    """Stampa l'albero in formato JSON stile MomaGraph."""
-    import json
-
-    nodes = [node['label'] for node in scene_graph]
-
-    edges = []
-    for i, node in enumerate(scene_graph):
-        for pred, obj_idx in node['relazioni']:
-
-            # Converti la relazione VG150 in funzionale o spaziale
-            functional = VG_TO_FUNCTIONAL.get(pred, None)
-            spatial = VG_TO_SPATIAL.get(pred, None)
-
-            edge = {
-                "object1": node['label'],
-                "object2": scene_graph[obj_idx]['label'],
-            }
-
-            if functional:
-                edge["functional_relationship"] = functional
-            if spatial:
-                edge["spatial_relations"] = [spatial]
-
-            # is_touching: True se la relazione implica contatto fisico
-            edge["is_touching"] = pred in ['holding', 'on', 'in',
-                                           'attached to', 'touching',
-                                           'covering', 'plugged into']
-
-            edges.append(edge)
-
-    # Rimuovi duplicati negli archi
-    unique_edges = []
-    seen = set()
-    for e in edges:
-        key = (e['object1'], e.get('functional_relationship',''),
-               e['object2'])
-        if key not in seen:
-            seen.add(key)
-            unique_edges.append(e)
-
-    # Costruisci il JSON finale stile MomaGraph
-    momagraph_json = {
-        "nodes": list(set(nodes)),  # rimuovi nodi duplicati
-        "edges": unique_edges,
-        "n_objects_seen": len(scene_graph),
-    }
-
-    print("\n" + "="*50)
-    print("SCENE GRAPH — Formato MomaGraph")
-    print("="*50)
-    print(json.dumps(momagraph_json, indent=2))
-    print("="*50 + "\n")
-
-# VERSIONE 2:MomaGraph-FINE
+# VERSIONE 2: MomaGraph-FINE
 # ══════════════════════════════════════════════════════════════
-
 
 
 # ── Loop principale ─────────────────────────────────────────
@@ -271,7 +271,6 @@ while True:
     if not ret:
         break
 
-    # Elabora ogni 5 frame per non sovraccaricare la CPU
     if frame_count % 5 == 0:
         result = sgg.predict(frame, visu_type='video')
         img, dbg = result
@@ -289,6 +288,14 @@ while True:
         break
     elif key == ord('p'):
         print_scene_graph()
+    
+    elif key == ord('h'):
+         label = input("Di quale oggetto vuoi la history? ")
+         history = get_position_history(scene_graph, label)
+         if history:
+            print(f"History di '{label}': {history}")
+         else:
+            print(f"Oggetto '{label}' non trovato nel grafo.")
 
 cap.release()
 cv2.destroyAllWindows()
