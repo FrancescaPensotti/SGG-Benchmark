@@ -8,7 +8,7 @@ import os
 from query_scene import get_position_history, get_current_position
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from demo.onnx_model import SGG_ONNX_Model
-
+from demo.query_scene import get_position_history, get_current_position, get_path_to_targets
 # ── Configurazione ──────────────────────────────────────────
 ONNX_PATH = "checkpoints/VG150/react++_yolov8m/model.onnx"
 SIMILARITY_THRESHOLD = 0.85  # soglia per considerare due oggetti "lo stesso"
@@ -296,6 +296,17 @@ while True:
             print(f"History di '{label}': {history}")
          else:
             print(f"Oggetto '{label}' non trovato nel grafo.")
+
+    elif key == ord('t'):
+    labels = input("Inserisci gli oggetti in ordine separati da virgola (es. bottle,phone): ")
+    target_labels = [l.strip() for l in labels.split(',')]
+    path = get_path_to_targets(scene_graph, target_labels)
+    if path:
+        print("\nPATH VERSO GLI OBIETTIVI:")
+        for step, target in enumerate(path):
+            print(f"  Step {step+1}: {target['label']} → {target['position']}")
+    else:
+        print("Nessun oggetto trovato nel grafo.")
 
 cap.release()
 cv2.destroyAllWindows()
