@@ -13,7 +13,10 @@ from demo.query_scene import get_position_history, get_current_position, get_pat
 ONNX_PATH = "checkpoints/VG150/react++_yolov8m/model.onnx"
 SIMILARITY_THRESHOLD = 0.85  # soglia per considerare due oggetti "lo stesso"
 FREQ_THRESHOLD = 10           # relazione deve essere vista almeno N volte
-
+BLACKLIST_OBJECTS = {
+    'table', 'floor', 'wall', 'ceiling', 'chair',
+    'ground', 'background', 'window', 'door'
+}
 # ── Mappe relazioni VG150 → MomaGraph ───────────────────────
 # Sempre attive, usate dal filtro relazioni
 VG_TO_FUNCTIONAL = {
@@ -95,6 +98,8 @@ def update_scene_graph(image, bboxes, rels):
     for i, box in enumerate(bboxes):
         cls_idx = int(box[5])
         label = sgg.stats['obj_classes'].get(cls_idx, str(cls_idx))
+        if label in BLACKLIST_OBJECTS:  # non considera gli oggetti nella blacklist
+            continue
         
         embedding = get_clip_embedding(image, box)
         if embedding is None:
