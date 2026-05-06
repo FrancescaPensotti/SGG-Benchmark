@@ -18,6 +18,7 @@ BLACKLIST_OBJECTS = {
     'ground', 'background', 'window', 'door'
 }
 SCALA_PIXEL_METRI = 0.00105  # da calibrare in lab con oggetto di dimensione nota
+DISAPPEAR_THRESHOLD = 20  # frame consecutivi senza vedere l'oggetto → rimosso - da valutare che valore dare
 
 # ── Mappe relazioni VG150 → MomaGraph ───────────────────────
 # Sempre attive, usate dal filtro relazioni
@@ -119,6 +120,7 @@ def update_scene_graph(image, bboxes, rels):
             scene_graph[existing_idx]['position'] = (cx, cy)
             scene_graph[existing_idx]['position_history'].append((cx, cy))
             box_to_node[i] = existing_idx
+            scene_graph[existing_idx]['frames_not_seen'] = 0  # resetta contatore scomparsa
         else:
             new_node = {
                 'label': label,
@@ -126,7 +128,8 @@ def update_scene_graph(image, bboxes, rels):
                 'relazioni': {},  # dizionario: (pred, obj_node) -> count
                 'count': 1,
                 'position': (cx, cy),
-                'position_history': [(cx, cy)]
+                'position_history': [(cx, cy)],
+                'frames_not_seen': 0,   # per rimuovere oggetti scomparsi
             }
             scene_graph.append(new_node)
             box_to_node[i] = len(scene_graph) - 1
@@ -149,6 +152,19 @@ def update_scene_graph(image, bboxes, rels):
                 else:
                     scene_graph[subj_node]['relazioni'][rel_key] = 1
 
+    # Incrementa frames_not_seen per oggetti non visti in questo frame e rimuovi quelli spariti
+    seen_nodes = set(box_to_node.values())
+    to_remove = []
+    for i, node in enumerate(scene_graph):
+        if i not in seen_nodes:
+            node['frames_not_seen'] += 1
+            if node['frames_not_seen'] >= DISAPPEAR_THRESHOLD:
+               print(f"  ⚠️ '{node['label']}' sparito dalla scena — probabilmente preso dal robot.")
+               to_remove.append(i)
+
+    # Rimuovi in ordine inverso per non alterare gli indici
+    for i in sorted(to_remove, reverse=True):
+     scene_graph.pop(i)
 # ══════════════════════════════════════════════════════════════
 # VERSIONE 1: SGG + CLIP - INIZIO
 
@@ -305,15 +321,15 @@ while True:
             print(f"Oggetto '{label}' non trovato nel grafo.")
 
     elif key == ord('t'):
-    labels = input("Inserisci gli oggetti in ordine separati da virgola: ")
-    target_labels = [l.strip() for l in labels.split(',')]
-    path = get_path_to_targets_meters(scene_graph, target_labels, SCALA_PIXEL_METRI)
-    if path:
-        print("\nPATH VERSO GLI OBIETTIVI:")
-        for step, target in enumerate(path):
+         labels = input("Inserisci gli oggetti in ordine separati da virgola: ")
+         target_labels = [l.strip() for l in labels.split(',')]
+         path = get_path_to_targets_meters(scene_graph, target_labels, SCALA_PIXEL_METRI)
+         if path:
+            print("\nPATH VERSO GLI OBIETTIVI:")
+         for step, target in enumerate(path):
             print(f"  Step {step+1}: {target['label']} → pixel: {target['position_pixel']} | metri: {target['position_metri']}")
-    else:
-        print("Nessun oggetto trovato nel grafo.")
+         else:
+            print("Nessun oggetto trovato nel grafo.")
 
 cap.release()
 cv2.destroyAllWindows()
