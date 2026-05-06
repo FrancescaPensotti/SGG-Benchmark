@@ -41,3 +41,38 @@ def get_path_to_targets(scene_graph, target_labels, freq_threshold=10):
                     })
                 break  # prendi il primo nodo che matcha
     return path
+
+def pixel_to_meters_2d(cx_pixel, cy_pixel, scala):
+    """
+    Converte coordinate pixel in metri sul piano 2D.
+    
+    Args:
+        cx_pixel, cy_pixel: centroide oggetto in pixel
+        scala: metri per pixel (da calibrare in lab)
+    
+    Returns:
+        (x_metri, y_metri): coordinate reali nel piano 2D
+    """
+    x_metri = cx_pixel * scala
+    y_metri = cy_pixel * scala
+    return (x_metri, y_metri)
+
+
+def get_path_to_targets_meters(scene_graph, target_labels, scala, freq_threshold=10):
+    """
+    Restituisce il path verso gli oggetti target in metri (piano 2D).
+    """
+    path = []
+    for label in target_labels:
+        for node in scene_graph:
+            if node['label'] == label and node['count'] >= freq_threshold:
+                pos = node.get('position')
+                if pos:
+                    pos_metri = pixel_to_meters_2d(pos[0], pos[1], scala)
+                    path.append({
+                        'label': label,
+                        'position_pixel': pos,
+                        'position_metri': pos_metri
+                    })
+                break
+    return path

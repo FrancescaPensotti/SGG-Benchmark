@@ -5,7 +5,7 @@ import numpy as np
 from PIL import Image
 import sys
 import os
-from query_scene import get_position_history, get_current_position
+from query_scene import get_path_to_targets_meters, get_position_history, get_current_position
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from demo.onnx_model import SGG_ONNX_Model
 from demo.query_scene import get_position_history, get_current_position, get_path_to_targets
@@ -17,6 +17,8 @@ BLACKLIST_OBJECTS = {
     'table', 'floor', 'wall', 'ceiling', 'chair',
     'ground', 'background', 'window', 'door'
 }
+SCALA_PIXEL_METRI = 0.00105  # da calibrare in lab con oggetto di dimensione nota
+
 # ── Mappe relazioni VG150 → MomaGraph ───────────────────────
 # Sempre attive, usate dal filtro relazioni
 VG_TO_FUNCTIONAL = {
@@ -303,13 +305,13 @@ while True:
             print(f"Oggetto '{label}' non trovato nel grafo.")
 
     elif key == ord('t'):
-    labels = input("Inserisci gli oggetti in ordine separati da virgola (es. bottle,phone): ")
+    labels = input("Inserisci gli oggetti in ordine separati da virgola: ")
     target_labels = [l.strip() for l in labels.split(',')]
-    path = get_path_to_targets(scene_graph, target_labels)
+    path = get_path_to_targets_meters(scene_graph, target_labels, SCALA_PIXEL_METRI)
     if path:
         print("\nPATH VERSO GLI OBIETTIVI:")
         for step, target in enumerate(path):
-            print(f"  Step {step+1}: {target['label']} → {target['position']}")
+            print(f"  Step {step+1}: {target['label']} → pixel: {target['position_pixel']} | metri: {target['position_metri']}")
     else:
         print("Nessun oggetto trovato nel grafo.")
 
