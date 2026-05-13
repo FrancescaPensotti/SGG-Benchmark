@@ -18,7 +18,7 @@ BLACKLIST_OBJECTS = {
     'ground', 'background', 'window', 'door'
 }
 SCALA_PIXEL_METRI = 0.00105  # da calibrare in lab con oggetto di dimensione nota
-DISAPPEAR_THRESHOLD = 20  # frame consecutivi senza vedere l'oggetto → rimosso - da valutare che valore dare
+DISAPPEAR_THRESHOLD = 30  # frame consecutivi senza vedere l'oggetto → rimosso - da valutare che valore dare
 
 # ── Mappe relazioni VG150 → MomaGraph ───────────────────────
 # Sempre attive, usate dal filtro relazioni
@@ -152,7 +152,7 @@ def update_scene_graph(image, bboxes, rels):
                 else:
                     scene_graph[subj_node]['relazioni'][rel_key] = 1
 
-    # Incrementa frames_not_seen per oggetti non visti in questo frame e rimuovi quelli spariti
+    # Incrementa frames_not_seen per oggetti non visti in questo frame e rimuovi quelli spariti (tolti completamente dalla memoria dell'albero)
     seen_nodes = set(box_to_node.values())
     to_remove = []
     for i, node in enumerate(scene_graph):
