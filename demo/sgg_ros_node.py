@@ -21,7 +21,7 @@ ONNX_PATH = "checkpoints/VG150/react++_yolov8m/model.onnx"
 SIMILARITY_THRESHOLD = 0.85
 FREQ_THRESHOLD = 10
 DISAPPEAR_THRESHOLD = 30
-SCALA_PIXEL_METRI = 0.00105  # da calibrare in lab
+SCALA_PIXEL_METRI = 0.000397  # da calibrare in lab
 
 BLACKLIST_OBJECTS = {
     'table', 'floor', 'wall', 'ceiling', 'chair',
@@ -88,6 +88,7 @@ def update_scene_graph(image, bboxes, rels):
             scene_graph[existing_idx]['count'] += 1
             scene_graph[existing_idx]['embedding'] = embedding
             scene_graph[existing_idx]['position'] = (cx, cy)
+            scene_graph[existing_idx]['bbox'] = (x1, y1, x2, y2) 
             scene_graph[existing_idx]['position_history'].append((cx, cy))
             scene_graph[existing_idx]['frames_not_seen'] = 0
             box_to_node[i] = existing_idx
@@ -98,6 +99,7 @@ def update_scene_graph(image, bboxes, rels):
                 'relazioni': {},
                 'count': 1,
                 'position': (cx, cy),
+                'bbox': (x1, y1, x2, y2), 
                 'position_history': [(cx, cy)],
                 'frames_not_seen': 0
             }
@@ -149,6 +151,15 @@ def print_scene_graph():
             if pred not in VG_TO_FUNCTIONAL and pred not in VG_TO_SPATIAL:
                 continue
             print(f"       --({pred})--> {scene_graph[obj_idx]['label']} [vista {count}x]")
+
+    bbox = node.get('bbox', 'N/A')
+    print(f"  [{i}] {node['label']} — bbox: {bbox} — larghezza: {bbox[2]-bbox[0]}px, altezza: {bbox[3]-bbox[1]}px")
+
+    bbox = node.get('bbox', 'N/A')
+    pos = node.get('position', (0,0))
+    pos_metri = (pos[0] * SCALA_PIXEL_METRI, pos[1] * SCALA_PIXEL_METRI)
+    print(f"  [{i}] {node['label']} — bbox: {bbox} — larghezza: {bbox[2]-bbox[0]}px, altezza: {bbox[3]-bbox[1]}px")
+    print(f"         pos pixel: {pos} | pos metri: ({pos_metri[0]:.3f}m, {pos_metri[1]:.3f}m)")
     print("="*50 + "\n")
 
 # ── Nodo ROS2 ───────────────────────────────────────────────
@@ -162,7 +173,7 @@ class SGGNode(Node):
         # Subscriber al topic della RealSense
         self.subscription = self.create_subscription(
             RosImage,
-            '/camera/color/image_raw',
+            '/camera/camera/color/image_raw',
             self.frame_callback,
             10)
         
@@ -221,7 +232,9 @@ def main():
     finally:
         cv2.destroyAllWindows()
         node.destroy_node()
+        print_scene_graph()  
         rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
+
