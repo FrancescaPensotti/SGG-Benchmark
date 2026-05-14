@@ -5,6 +5,7 @@ import numpy as np
 from PIL import Image
 import sys
 import os
+import threading
 
 # ROS2
 import rclpy
@@ -30,6 +31,34 @@ BLACKLIST_OBJECTS = {
     'mouth', 'neck', 'arm', 'leg'
 }
 
+# ── Mappe relazioni VG150 → MomaGraph ───────────────────────
+VG_TO_FUNCTIONAL = {
+    'holding':      'control',
+    'using':        'control',
+    'carrying':     'control',
+    'attached to':  'pairwith',
+    'connected to': 'pairwith',
+    'hanging from': 'pairwith',
+    'plugged into': 'providepower',
+    'covering':     'openorclose',
+    'on':           'pairwith',
+    'in':           'pairwith',
+}
+
+VG_TO_SPATIAL = {
+    'above':       'higher_than',
+    'below':       'lower_than',
+    'behind':      'behind',
+    'in front of': 'in_front_of',
+    'left of':     'left_of',
+    'right of':    'right_of',
+    'near':        'close',
+    'next to':     'close',
+    'on':          'touching',
+    'in':          'touching',
+    'touching':    'touching',
+}
+
 # ── Carica i modelli ────────────────────────────────────────
 print("Carico SGG-Benchmark...")
 sgg = SGG_ONNX_Model(None, ONNX_PATH)
@@ -42,7 +71,7 @@ print(f"Pronti! Uso: {device}")
 # ── Albero semantico ────────────────────────────────────────
 scene_graph = []
 
-# ── Funzioni (stesse di incremental_scene.py) ───────────────
+# ── Funzioni ────────────────────────────────────────────────
 def get_clip_embedding(image, box):
     x1, y1, x2, y2 = map(int, box[:4])
     crop = image[y1:y2, x1:x2]
@@ -88,7 +117,7 @@ def update_scene_graph(image, bboxes, rels):
             scene_graph[existing_idx]['count'] += 1
             scene_graph[existing_idx]['embedding'] = embedding
             scene_graph[existing_idx]['position'] = (cx, cy)
-            scene_graph[existing_idx]['bbox'] = (x1, y1, x2, y2) 
+            scene_graph[existing_idx]['bbox'] = (x1, y1, x2, y2)
             scene_graph[existing_idx]['position_history'].append((cx, cy))
             scene_graph[existing_idx]['frames_not_seen'] = 0
             box_to_node[i] = existing_idx
@@ -99,7 +128,7 @@ def update_scene_graph(image, bboxes, rels):
                 'relazioni': {},
                 'count': 1,
                 'position': (cx, cy),
-                'bbox': (x1, y1, x2, y2), 
+                'bbox': (x1, y1, x2, y2),
                 'position_history': [(cx, cy)],
                 'frames_not_seen': 0
             }
@@ -142,24 +171,20 @@ def print_scene_graph():
     for i, node in enumerate(scene_graph):
         if node['count'] < FREQ_THRESHOLD:
             continue
-        pos = node.get('position', 'N/A')
+        pos = node.get('position', (0, 0))
         history = node.get('position_history', [])
-        print(f"  [{i}] {node['label']} (visto {node['count']} volte) — pos attuale: {pos} — storia: {len(history)} punti")
+        bbox = node.get('bbox', None)
+        pos_metri = (pos[0] * SCALA_PIXEL_METRI, pos[1] * SCALA_PIXEL_METRI)
+        print(f"  [{i}] {node['label']} (visto {node['count']} volte) — storia: {len(history)} punti")
+        print(f"       pos pixel: {pos} | pos metri: ({pos_metri[0]:.3f}m, {pos_metri[1]:.3f}m)")
+        if bbox:
+            print(f"       bbox: {bbox} — larghezza: {bbox[2]-bbox[0]}px, altezza: {bbox[3]-bbox[1]}px")
         for (pred, obj_idx), count in node['relazioni'].items():
             if count < FREQ_THRESHOLD:
                 continue
             if pred not in VG_TO_FUNCTIONAL and pred not in VG_TO_SPATIAL:
                 continue
             print(f"       --({pred})--> {scene_graph[obj_idx]['label']} [vista {count}x]")
-
-    bbox = node.get('bbox', 'N/A')
-    print(f"  [{i}] {node['label']} — bbox: {bbox} — larghezza: {bbox[2]-bbox[0]}px, altezza: {bbox[3]-bbox[1]}px")
-
-    bbox = node.get('bbox', 'N/A')
-    pos = node.get('position', (0,0))
-    pos_metri = (pos[0] * SCALA_PIXEL_METRI, pos[1] * SCALA_PIXEL_METRI)
-    print(f"  [{i}] {node['label']} — bbox: {bbox} — larghezza: {bbox[2]-bbox[0]}px, altezza: {bbox[3]-bbox[1]}px")
-    print(f"         pos pixel: {pos} | pos metri: ({pos_metri[0]:.3f}m, {pos_metri[1]:.3f}m)")
     print("="*50 + "\n")
 
 # ── Nodo ROS2 ───────────────────────────────────────────────
@@ -169,57 +194,76 @@ class SGGNode(Node):
         self.bridge = CvBridge()
         self.frame_count = 0
         self.img = None
+        self.lock = threading.Lock()
 
-        # Subscriber al topic della RealSense
+        # Subscriber RealSense
         self.subscription = self.create_subscription(
             RosImage,
             '/camera/camera/color/image_raw',
             self.frame_callback,
             10)
-        
-        self.get_logger().info("SGG Node avviato — in ascolto su /camera/color/image_raw")
+
+        # Timer per visualizzazione (ogni 100ms)
+        self.create_timer(0.1, self.display_callback)
+
+        # Thread separato per i comandi da tastiera
+        self.cmd_thread = threading.Thread(target=self.command_loop, daemon=True)
+        self.cmd_thread.start()
+
+        self.get_logger().info("SGG Node avviato — in ascolto su /camera/camera/color/image_raw")
 
     def frame_callback(self, msg):
-        """Callback chiamata ad ogni nuovo frame dalla camera."""
         frame = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
         self.frame_count += 1
 
-        # Elabora ogni 5 frame
         if self.frame_count % 5 == 0:
             result = sgg.predict(frame, visu_type='video')
-            self.img, dbg = result
+            with self.lock:
+                self.img, dbg = result
+                if dbg is not None:
+                    bboxes, rels = dbg
+                    update_scene_graph(frame, bboxes, rels)
 
-            if dbg is not None:
-                bboxes, rels = dbg
-                update_scene_graph(frame, bboxes, rels)
+    def display_callback(self):
+        with self.lock:
+            if self.img is not None:
+                cv2.imshow("SGG ROS2 Node", self.img)
+                cv2.waitKey(1)
 
-        # Mostra il frame
-        if self.img is not None:
-            cv2.imshow("SGG ROS2 Node", self.img)
+    def command_loop(self):
+        print("\nComandi disponibili:")
+        print("  p → stampa albero semantico")
+        print("  h → history posizioni di un oggetto")
+        print("  t → path verso oggetti target")
+        print("  q → esci\n")
 
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord('p'):
-            print_scene_graph()
-        elif key == ord('t'):
-            label_input = input("Oggetti target (separati da virgola): ")
-            target_labels = [l.strip() for l in label_input.split(',')]
-            path = get_path_to_targets_meters(scene_graph, target_labels, SCALA_PIXEL_METRI)
-            if path:
-                print("\nPATH VERSO GLI OBIETTIVI:")
-                for step, target in enumerate(path):
-                    print(f"  Step {step+1}: {target['label']} → pixel: {target['position_pixel']} | metri: {target['position_metri']}")
-            else:
-                print("Nessun oggetto trovato.")
-        elif key == ord('h'):
-            label = input("Di quale oggetto vuoi la history? ")
-            history = get_position_history(scene_graph, label)
-            if history:
-                print(f"History di '{label}': {history}")
-            else:
-                print(f"Oggetto '{label}' non trovato.")
-        elif key == ord('q'):
-            self.get_logger().info("Chiusura nodo SGG.")
-            rclpy.shutdown()
+        while rclpy.ok():
+            try:
+                cmd = input("Comando: ").strip().lower()
+                if cmd == 'p':
+                    print_scene_graph()
+                elif cmd == 'h':
+                    label = input("Di quale oggetto vuoi la history? ")
+                    history = get_position_history(scene_graph, label)
+                    if history:
+                        print(f"History di '{label}': {history}")
+                    else:
+                        print(f"Oggetto '{label}' non trovato.")
+                elif cmd == 't':
+                    labels = input("Oggetti target (separati da virgola): ")
+                    target_labels = [l.strip() for l in labels.split(',')]
+                    path = get_path_to_targets_meters(scene_graph, target_labels, SCALA_PIXEL_METRI)
+                    if path:
+                        print("\nPATH VERSO GLI OBIETTIVI:")
+                        for step, target in enumerate(path):
+                            print(f"  Step {step+1}: {target['label']} → pixel: {target['position_pixel']} | metri: {target['position_metri']}")
+                    else:
+                        print("Nessun oggetto trovato.")
+                elif cmd == 'q':
+                    rclpy.shutdown()
+                    break
+            except EOFError:
+                break
 
 # ── Main ────────────────────────────────────────────────────
 def main():
@@ -232,9 +276,8 @@ def main():
     finally:
         cv2.destroyAllWindows()
         node.destroy_node()
-        print_scene_graph()  
+        print_scene_graph()
         rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
-
