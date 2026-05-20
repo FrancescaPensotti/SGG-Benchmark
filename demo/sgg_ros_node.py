@@ -16,13 +16,14 @@ from cv_bridge import CvBridge
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from demo.onnx_model import SGG_ONNX_Model
 from demo.query_scene import get_position_history, get_current_position, get_path_to_targets_meters
+from demo.aruco_detector import detect_aruco, pixel_to_meters_3d, CAMERA_MATRIX
 
 # ── Configurazione ──────────────────────────────────────────
 ONNX_PATH = "checkpoints/VG150/react++_yolov8m/model.onnx"
 SIMILARITY_THRESHOLD = 0.85
 FREQ_THRESHOLD = 10
 DISAPPEAR_THRESHOLD = 30
-SCALA_PIXEL_METRI = 0.000397  # da calibrare in lab
+SCALA_PIXEL_METRI = 0.000397  # fallback se ArUco non è visibile
 
 BLACKLIST_OBJECTS = {
     'table', 'floor', 'wall', 'ceiling', 'chair',
@@ -70,6 +71,7 @@ print(f"Pronti! Uso: {device}")
 
 # ── Albero semantico ────────────────────────────────────────
 scene_graph = []
+current_z = None  # aggiornata quando viene rilevato un marker ArUco
 
 # ── Funzioni ────────────────────────────────────────────────
 def get_clip_embedding(image, box):
@@ -174,9 +176,14 @@ def print_scene_graph():
         pos = node.get('position', (0, 0))
         history = node.get('position_history', [])
         bbox = node.get('bbox', None)
-        pos_metri = (pos[0] * SCALA_PIXEL_METRI, pos[1] * SCALA_PIXEL_METRI)
+        if current_z is not None:
+            pos_metri = pixel_to_meters_3d(pos[0], pos[1], current_z, CAMERA_MATRIX)
+            depth_info = f"z={current_z:.3f}m (ArUco)"
+        else:
+            pos_metri = (pos[0] * SCALA_PIXEL_METRI, pos[1] * SCALA_PIXEL_METRI)
+            depth_info = "z=N/A (scala fissa)"
         print(f"  [{i}] {node['label']} (visto {node['count']} volte) — storia: {len(history)} punti")
-        print(f"       pos pixel: {pos} | pos metri: ({pos_metri[0]:.3f}m, {pos_metri[1]:.3f}m)")
+        print(f"       pos pixel: {pos} | pos metri: ({pos_metri[0]:.3f}m, {pos_metri[1]:.3f}m) | {depth_info}")
         if bbox:
             print(f"       bbox: {bbox} — larghezza: {bbox[2]-bbox[0]}px, altezza: {bbox[3]-bbox[1]}px")
         for (pred, obj_idx), count in node['relazioni'].items():
@@ -224,6 +231,12 @@ class SGGNode(Node):
                     bboxes, rels = dbg
                     update_scene_graph(frame, bboxes, rels)
 
+                # Rileva ArUco e aggiorna Z
+                aruco_results, _ = detect_aruco(frame)
+                if aruco_results:
+                    global current_z
+                    current_z = aruco_results[0]['z']  # usa il primo marker trovato
+
     def display_callback(self):
         with self.lock:
             if self.img is not None:
@@ -252,7 +265,18 @@ class SGGNode(Node):
                 elif cmd == 't':
                     labels = input("Oggetti target (separati da virgola): ")
                     target_labels = [l.strip() for l in labels.split(',')]
-                    path = get_path_to_targets_meters(scene_graph, target_labels, SCALA_PIXEL_METRI)
+                    if current_z is not None:
+                        path = []
+                        for label in target_labels:
+                            for node in scene_graph:
+                                if node['label'] == label and node['count'] >= FREQ_THRESHOLD:
+                                    pos = node.get('position')
+                                    if pos:
+                                        pos_metri = pixel_to_meters_3d(pos[0], pos[1], current_z, CAMERA_MATRIX)
+                                        path.append({'label': label, 'position_pixel': pos, 'position_metri': pos_metri})
+                                    break
+                    else:
+                        path = get_path_to_targets_meters(scene_graph, target_labels, SCALA_PIXEL_METRI)
                     if path:
                         print("\nPATH VERSO GLI OBIETTIVI:")
                         for step, target in enumerate(path):
