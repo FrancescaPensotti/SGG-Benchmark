@@ -57,6 +57,7 @@ def detect_aruco(frame):
                 'id': int(marker_id),
                 'position': (x, y, z),
                 'z': z
+                'corners': corners[i] 
             })
             
             # Disegna marker e asse sul frame
@@ -68,7 +69,7 @@ def detect_aruco(frame):
                        (int(corners[i][0][0][0]), int(corners[i][0][0][1]) - 10),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
     
-    return results, frame
+    return results, frame, corners if ids is not None else []
 
 
 def pixel_to_meters_3d(cx_pixel, cy_pixel, z, camera_matrix):
@@ -118,3 +119,26 @@ if __name__ == '__main__':
     
     cap.release()
     cv2.destroyAllWindows()
+
+
+def calcola_scala_da_aruco(corners, marker_size=MARKER_SIZE):
+    """
+    Calcola la scala pixel→metri usando le dimensioni note del marker ArUco.
+    
+    Args:
+        corners: corners del marker rilevato da OpenCV
+        marker_size: lato del marker in metri
+    
+    Returns:
+        scala in metri/pixel
+    """
+    # Calcola larghezza in pixel del marker
+    corner = corners[0]
+    larghezza_px = np.linalg.norm(corner[0][0] - corner[0][1])
+    altezza_px = np.linalg.norm(corner[0][1] - corner[0][2])
+    
+    # Media larghezza e altezza per robustezza
+    dimensione_px = (larghezza_px + altezza_px) / 2
+    
+    scala = marker_size / dimensione_px
+    return scala

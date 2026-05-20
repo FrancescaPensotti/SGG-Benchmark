@@ -16,7 +16,7 @@ from cv_bridge import CvBridge
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from demo.onnx_model import SGG_ONNX_Model
 from demo.query_scene import get_position_history, get_current_position, get_path_to_targets_meters
-from demo.aruco_detector import detect_aruco, pixel_to_meters_3d, CAMERA_MATRIX
+from demo.aruco_detector import detect_aruco, pixel_to_meters_3d, CAMERA_MATRIX, calcola_scala_da_aruco
 
 # ── Configurazione ──────────────────────────────────────────
 ONNX_PATH = "checkpoints/VG150/react++_yolov8m/model.onnx"
@@ -231,12 +231,13 @@ class SGGNode(Node):
                     bboxes, rels = dbg
                     update_scene_graph(frame, bboxes, rels)
 
-                # Rileva ArUco e aggiorna Z
-                aruco_results, _ = detect_aruco(frame)
+                # Rileva ArUco e aggiorna Z e scala
+                aruco_results, _, _ = detect_aruco(frame)
                 if aruco_results:
-                    global current_z
-                    current_z = aruco_results[0]['z']  # usa il primo marker trovato
-
+                    global current_z, SCALA_PIXEL_METRI
+                    current_z = aruco_results[0]['z']
+                    SCALA_PIXEL_METRI = calcola_scala_da_aruco(aruco_results[0]['corners']) 
+   
     def display_callback(self):
         with self.lock:
             if self.img is not None:
