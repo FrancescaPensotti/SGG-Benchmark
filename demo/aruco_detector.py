@@ -93,13 +93,13 @@ def calcola_scala_da_aruco(corners, marker_size=MARKER_SIZE):
     """
     Calcola la scala pixel→metri dalle dimensioni note del marker ArUco.
     """
-    corner = corners[0]
-    larghezza_px = np.linalg.norm(corner[0][0] - corner[0][1])
-    altezza_px = np.linalg.norm(corner[0][1] - corner[0][2])
+    # corners[0] ha shape (4, 2) — 4 angoli, ciascuno con (x, y)
+    pts = corners[0]  # shape: (4, 2)
+    larghezza_px = np.linalg.norm(pts[0] - pts[1])
+    altezza_px = np.linalg.norm(pts[1] - pts[2])
     dimensione_px = (larghezza_px + altezza_px) / 2
     scala = marker_size / dimensione_px
     return scala
-
 
 # ── Test standalone con webcam ───────────────────────────────
 if __name__ == '__main__':
