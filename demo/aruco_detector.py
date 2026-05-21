@@ -8,8 +8,8 @@ import os
 # DA AGGIORNARE IN LAB con: ros2 topic echo /camera/camera/color/camera_info
 # Cercare il campo K: [fx, 0, cx, 0, fy, cy, 0, 0, 1]
 CAMERA_MATRIX = np.array([
-    [615.0,   0.0, 320.0],
-    [  0.0, 615.0, 240.0],
+    [912.123779296875,  0.0, 650.857666015625],
+    [  0.0, 911.9319458007812, 383.904541015625],
     [  0.0,   0.0,   1.0]
 ], dtype=np.float32)
 
@@ -17,7 +17,7 @@ DIST_COEFFS = np.zeros((4, 1), dtype=np.float32)  # RealSense ha distorsione min
 
 # Dimensione del lato del marker ArUco in metri
 # DA MISURARE sul marker stampato fisicamente
-MARKER_SIZE = 0.05  # es. 5cm — aggiorna con la misura reale
+MARKER_SIZE = 0.10 
 
 # Dizionario ArUco da usare
 ARUCO_DICT = cv2.aruco.DICT_6X6_250
