@@ -21,14 +21,14 @@ from demo.aruco_detector import detect_aruco, pixel_to_meters_3d, CAMERA_MATRIX,
 # ── Configurazione ──────────────────────────────────────────
 ONNX_PATH = "checkpoints/VG150/react++_yolov8m/model.onnx"
 SIMILARITY_THRESHOLD = 0.85
-FREQ_THRESHOLD = 10
-DISAPPEAR_THRESHOLD = 30
+FREQ_THRESHOLD = 2
+DISAPPEAR_THRESHOLD = 10
 SCALA_PIXEL_METRI = 0.000397  # fallback se ArUco non è visibile
 
 BLACKLIST_OBJECTS = {
-    'table', 'floor', 'wall', 'ceiling', 'chair',
+    'floor', 'wall', 'ceiling', 'chair',
     'ground', 'background', 'window', 'door',
-    'hair', 'nose', 'face', 'head', 'eye', 'ear',
+    'hair', 'nose', 'table','face', 'head', 'eye', 'ear',
     'mouth', 'neck', 'arm', 'leg'
 }
 
@@ -236,8 +236,14 @@ class SGGNode(Node):
                 if aruco_results:
                     global current_z, SCALA_PIXEL_METRI
                     current_z = aruco_results[0]['z']
-                    SCALA_PIXEL_METRI = calcola_scala_da_aruco(aruco_results[0]['corners']) 
-   
+                    SCALA_PIXEL_METRI = calcola_scala_da_aruco(aruco_results[0]['corners'])
+                    # Calibrazione: stampa distanza tra due marker se entrambi visibili
+                    if len(aruco_results) >= 2:
+                        p1 = aruco_results[0]['position']
+                        p2 = aruco_results[1]['position']
+                        dist = np.sqrt((p1[0]-p2[0])**2 + (p1[1]-p2[1])**2 + (p1[2]-p2[2])**2)
+                        print(f"  📏 Distanza tra marker: {dist:.3f}m (attesa: 0.20m)")
+                        
     def display_callback(self):
         with self.lock:
             if self.img is not None:

@@ -12,7 +12,7 @@ CAMERA_MATRIX = np.array([
 
 DIST_COEFFS = np.zeros((4, 1), dtype=np.float32)
 
-MARKER_SIZE = 0.10  # 10cm
+MARKER_SIZE = 0.03 # 3cm
 
 ARUCO_DICT = cv2.aruco.DICT_6X6_250
 
