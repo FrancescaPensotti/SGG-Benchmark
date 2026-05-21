@@ -237,7 +237,10 @@ class SGGNode(Node):
                     global current_z, SCALA_PIXEL_METRI
                     current_z = aruco_results[0]['z']
                     SCALA_PIXEL_METRI = calcola_scala_da_aruco(aruco_results[0]['corners'])
-                    # Calibrazione: stampa distanza tra due marker se entrambi visibili
+                    # Stampa posizione di ogni marker
+                    for r in aruco_results:
+                        print(f"  ArUco ID{r['id']}: x={r['position'][0]:.3f}m, y={r['position'][1]:.3f}m, z={r['position'][2]:.3f}m")
+                    # Calibrazione: distanza tra due marker
                     if len(aruco_results) >= 2:
                         p1 = aruco_results[0]['position']
                         p2 = aruco_results[1]['position']
