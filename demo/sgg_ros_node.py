@@ -23,7 +23,7 @@ ONNX_PATH = "checkpoints/VG150/react++_yolov8m/model.onnx"
 SIMILARITY_THRESHOLD = 0.85
 FREQ_THRESHOLD = 2
 DISAPPEAR_THRESHOLD = 10
-SCALA_PIXEL_METRI = 0.000397  # fallback se ArUco non è visibile
+SCALA_PIXEL_METRI = 0.000435  # fallback se ArUco non visibile, calcolato con z=0.397m
 
 BLACKLIST_OBJECTS = {
     'floor', 'wall', 'ceiling', 'chair',
@@ -258,6 +258,7 @@ class SGGNode(Node):
         print("  p → stampa albero semantico")
         print("  h → history posizioni di un oggetto")
         print("  t → path verso oggetti target")
+        print("  g → target in linguaggio naturale (Gemini)")
         print("  q → esci\n")
 
         while rclpy.ok():
@@ -293,6 +294,34 @@ class SGGNode(Node):
                             print(f"  Step {step+1}: {target['label']} → pixel: {target['position_pixel']} | metri: {target['position_metri']}")
                     else:
                         print("Nessun oggetto trovato.")
+
+                elif cmd == 'g':
+                    from demo.gemini_retrieval import scene_graph_to_json, resolve_targets
+                    descrizione = input("Descrivi il target a parole tue: ")
+                    scene_json = scene_graph_to_json(scene_graph, FREQ_THRESHOLD)
+                    target_labels = resolve_targets(descrizione, scene_json)
+                    if not target_labels:
+                        print("Gemini non ha trovato oggetti corrispondenti nella scena.")
+                    else:
+                        print(f"Gemini ha identificato: {target_labels}")
+                        path = []
+                        for label in target_labels:
+                            for node in scene_graph:
+                                if node['label'] == label and node['count'] >= FREQ_THRESHOLD:
+                                    pos = node.get('position')
+                                    if pos and current_z is not None:
+                                        pos_metri = pixel_to_meters_3d(pos[0], pos[1], current_z, CAMERA_MATRIX)
+                                        path.append({'label': label, 'position_pixel': pos, 'position_metri': pos_metri})
+                                    elif pos:
+                                        pos_metri = (pos[0] * SCALA_PIXEL_METRI, pos[1] * SCALA_PIXEL_METRI)
+                                        path.append({'label': label, 'position_pixel': pos, 'position_metri': pos_metri})
+                                    break
+                        if path:
+                            print("\nPATH VERSO GLI OBIETTIVI (da linguaggio naturale):")
+                            for step, t in enumerate(path):
+                                print(f"  Step {step+1}: {t['label']} → pixel: {t['position_pixel']} | metri: {t['position_metri']}")
+                        else:
+                            print("Oggetti identificati ma posizione non disponibile.")
                 elif cmd == 'q':
                     rclpy.shutdown()
                     break
