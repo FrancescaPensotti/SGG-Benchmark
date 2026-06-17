@@ -5,26 +5,26 @@
 # Idea: l'operatore non digita la label esatta della classe
 # (es. "glass"), ma descrive il target a parole sue
 # (es. "la cosa con cui bevo"). Gemini riceve il grafo della
-# scena corrente + la descrizione e restituisce SOLO le label
+# scena corrente + la descrizione e restituisce solo le label
 # degli oggetti realmente presenti nella scena che corrispondono.
 #
 # Due funzioni:
 #   - scene_graph_to_json(scene_graph)  → serializza il grafo
 #   - resolve_targets(descrizione, scene_json) → lista di label
 #
-# Decoupling: questo file NON importa nulla da sgg_ros_node.
-# Riceve lo scene_graph come argomento, così resta autonomo
+# Decoupling: questo file riceve solo lo scene_graph come argomento, così resta autonomo
 # e testabile da solo.
 # ──────────────────────────────────────────────────────────────
 
 import os
 import json
+import time
 
 from google import genai
 from google.genai import types
 
 # ── Configurazione ──────────────────────────────────────────
-MODEL = "gemini-2.5-flash"   # free tier; per spendere meno: "gemini-2.5-flash-lite"
+MODEL = "gemini-2.5-flash"   # free tier "gemini-2.5-flash-lite"
 FREQ_THRESHOLD = 2           # stesso filtro frequenza usato nel nodo ROS2
 
 # Client creato una sola volta (lazy) e riusato.
@@ -147,14 +147,24 @@ Rispondi SOLO con un array JSON di stringhe, senza testo aggiuntivo.
 Esempio di output valido: ["glass"]  oppure  ["bottle", "phone"]  oppure  []
 """
 
-    response = client.models.generate_content(
-        model=model,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            temperature=0.0,                       # deterministico
-            response_mime_type="application/json", # forza output JSON
-        ),
-    )
+    for attempt in range(3):
+        try:
+            response = client.models.generate_content(
+                model=model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.0,
+                    response_mime_type="application/json",
+                ),
+            )
+            break
+        except Exception as e:
+            if attempt < 2:
+                print(f"[gemini_retrieval] Tentativo {attempt+1} fallito: {e}. Riprovo tra 3s...")
+                time.sleep(3)
+            else:
+                print(f"[gemini_retrieval] Tutti i tentativi falliti: {e}")
+                return []
 
     # Parsing robusto della risposta.
     raw = (response.text or "").strip()

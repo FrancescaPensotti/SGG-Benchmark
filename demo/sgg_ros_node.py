@@ -22,7 +22,7 @@ from demo.aruco_detector import detect_aruco, pixel_to_meters_3d, CAMERA_MATRIX,
 ONNX_PATH = "checkpoints/VG150/react++_yolov8m/model.onnx"
 SIMILARITY_THRESHOLD = 0.85
 FREQ_THRESHOLD = 2
-DISAPPEAR_THRESHOLD = 10
+DISAPPEAR_THRESHOLD = 50
 SCALA_PIXEL_METRI = 0.000435  # fallback se ArUco non visibile, calcolato con z=0.397m
 
 BLACKLIST_OBJECTS = {
@@ -238,8 +238,8 @@ class SGGNode(Node):
                     current_z = aruco_results[0]['z']
                     SCALA_PIXEL_METRI = calcola_scala_da_aruco(aruco_results[0]['corners'])
                     # Stampa posizione di ogni marker
-                    for r in aruco_results:
-                        print(f"  ArUco ID{r['id']}: x={r['position'][0]:.3f}m, y={r['position'][1]:.3f}m, z={r['position'][2]:.3f}m")
+                    #for r in aruco_results:
+                       #print(f"  ArUco ID{r['id']}: x={r['position'][0]:.3f}m, y={r['position'][1]:.3f}m, z={r['position'][2]:.3f}m")
                     # Calibrazione: distanza tra due marker
                     if len(aruco_results) >= 2:
                         p1 = aruco_results[0]['position']
@@ -267,15 +267,24 @@ class SGGNode(Node):
                 if cmd == 'p':
                     print_scene_graph()
                 elif cmd == 'h':
-                    label = input("Di quale oggetto vuoi la history? ")
+                    descrizione = input("Di quale oggetto vuoi la history? (puoi descriverlo a parole tue) ")
+                    from demo.gemini_retrieval import scene_graph_to_json, resolve_targets
+                    scene_json = scene_graph_to_json(scene_graph, FREQ_THRESHOLD)
+                    labels = resolve_targets(descrizione, scene_json)
+                    label = labels[0] if labels else descrizione
                     history = get_position_history(scene_graph, label)
                     if history:
                         print(f"History di '{label}': {history}")
                     else:
-                        print(f"Oggetto '{label}' non trovato.")
+                        print(f"Oggetto '{label}' non trovato nella scena.")
                 elif cmd == 't':
-                    labels = input("Oggetti target (separati da virgola): ")
-                    target_labels = [l.strip() for l in labels.split(',')]
+                    descrizione = input("Oggetti target (puoi descriverli a parole tue, separati da virgola): ")
+                    from demo.gemini_retrieval import scene_graph_to_json, resolve_targets
+                    scene_json = scene_graph_to_json(scene_graph, FREQ_THRESHOLD)
+                    target_labels = resolve_targets(descrizione, scene_json)
+                    if not target_labels:
+                        # fallback: tratta l'input come label esatte
+                        target_labels = [l.strip() for l in descrizione.split(',')]
                     if current_z is not None:
                         path = []
                         for label in target_labels:
