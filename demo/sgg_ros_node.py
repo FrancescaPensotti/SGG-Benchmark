@@ -121,6 +121,7 @@ def update_scene_graph(image, bboxes, rels):
             scene_graph[existing_idx]['position'] = (cx, cy)
             scene_graph[existing_idx]['bbox'] = (x1, y1, x2, y2)
             scene_graph[existing_idx]['position_history'].append((cx, cy))
+            scene_graph[existing_idx]['position_history'] = scene_graph[existing_idx]['position_history'][-50:]
             scene_graph[existing_idx]['frames_not_seen'] = 0
             box_to_node[i] = existing_idx
         else:
@@ -259,6 +260,7 @@ class SGGNode(Node):
         print("  h → history posizioni di un oggetto")
         print("  t → path verso oggetti target")
         print("  g → target in linguaggio naturale (Gemini)")
+        print("  v → verifica posizioni (distanze a coppie + z)")
         print("  q → esci\n")
 
         while rclpy.ok():
@@ -331,6 +333,45 @@ class SGGNode(Node):
                                 print(f"  Step {step+1}: {t['label']} → pixel: {t['position_pixel']} | metri: {t['position_metri']}")
                         else:
                             print("Oggetti identificati ma posizione non disponibile.")
+                
+                elif cmd == 'v':
+                    # Verifica posizioni: distanze a coppie + posizione relativa al marker ArUco
+                    import itertools
+                    oggetti = []
+                    for node in scene_graph:
+                        if node['count'] >= FREQ_THRESHOLD and node.get('position'):
+                            pos = node['position']
+                            if current_z is not None:
+                                pm = pixel_to_meters_3d(pos[0], pos[1], current_z, CAMERA_MATRIX)
+                            else:
+                                pm = (pos[0] * SCALA_PIXEL_METRI, pos[1] * SCALA_PIXEL_METRI)
+                            oggetti.append({'label': node['label'], 'pixel': pos, 'metri': pm})
+
+                    if len(oggetti) < 1:
+                        print("Nessun oggetto stabile nella scena.")
+                    else:
+                        print("\n" + "="*50)
+                        print("VERIFICA POSIZIONI")
+                        print("="*50)
+                        for o in oggetti:
+                            print(f"  {o['label']}: pixel {o['pixel']} | metri ({o['metri'][0]:.4f}, {o['metri'][1]:.4f})")
+
+                        # Test 1 — distanze a coppie
+                        if len(oggetti) >= 2:
+                            print("\n  DISTANZE A COPPIE (test di coerenza):")
+                            for a, b in itertools.combinations(oggetti, 2):
+                                dx = b['metri'][0] - a['metri'][0]
+                                dy = b['metri'][1] - a['metri'][1]
+                                dist = (dx**2 + dy**2) ** 0.5
+                                print(f"    {a['label']} <-> {b['label']}: {dist:.4f} m ({dist*100:.1f} cm)")
+
+                        # Test 2 — posizione relativa al marker ArUco
+                        if current_z is not None:
+                            print(f"\n  z corrente (ArUco): {current_z:.4f} m")
+                            print("  (per il test assoluto: confronta gli spostamenti relativi tra oggetti")
+                            print("   con le distanze misurate fisicamente sul piano)")
+                        print("="*50 + "\n")
+
                 elif cmd == 'q':
                     rclpy.shutdown()
                     break
