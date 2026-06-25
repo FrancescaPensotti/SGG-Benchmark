@@ -6,6 +6,7 @@ from PIL import Image
 import sys
 import os
 import threading
+from geometry_msgs.msg import PointStamped
 
 # ROS2
 import rclpy
@@ -195,6 +196,8 @@ def print_scene_graph():
             print(f"       --({pred})--> {scene_graph[obj_idx]['label']} [vista {count}x]")
     print("="*50 + "\n")
 
+
+
 # ── Nodo ROS2 ───────────────────────────────────────────────
 class SGGNode(Node):
     def __init__(self):
@@ -210,6 +213,9 @@ class SGGNode(Node):
             '/camera/camera/color/image_raw',
             self.frame_callback,
             10)
+        
+        # Publisher della posizione del target verso il nodo MoveIt
+        self.target_pub = self.create_publisher(PointStamped, '/sgg/target_point', 10)
 
         # Timer per visualizzazione (ogni 100ms)
         self.create_timer(0.1, self.display_callback)
@@ -253,6 +259,22 @@ class SGGNode(Node):
             if self.img is not None:
                 cv2.imshow("SGG ROS2 Node", self.img)
                 cv2.waitKey(1)
+    
+    def pubblica_target(self, pos_pixel):
+        """Pubblica la posizione 3D del target nel frame camera, per il nodo MoveIt."""
+        if current_z is None:
+            self.get_logger().warn("current_z non disponibile (ArUco non visto): non pubblico il target.")
+            return
+        pm = pixel_to_meters_3d(pos_pixel[0], pos_pixel[1], current_z, CAMERA_MATRIX)
+        msg = PointStamped()
+        msg.header.frame_id = "camera_color_optical_frame"
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.point.x = float(pm[0])
+        msg.point.y = float(pm[1])
+        msg.point.z = float(current_z)
+        self.target_pub.publish(msg)
+        print(f"  → Target pubblicato su /sgg/target_point: ({pm[0]:.3f}, {pm[1]:.3f}, {current_z:.3f}) [frame camera]")
+
 
     def command_loop(self):
         print("\nComandi disponibili:")
@@ -296,6 +318,7 @@ class SGGNode(Node):
                                     if pos:
                                         pos_metri = pixel_to_meters_3d(pos[0], pos[1], current_z, CAMERA_MATRIX)
                                         path.append({'label': label, 'position_pixel': pos, 'position_metri': pos_metri})
+                                        self.pubblica_target(pos)
                                     break
                     else:
                         path = get_path_to_targets_meters(scene_graph, target_labels, SCALA_PIXEL_METRI)
@@ -323,6 +346,7 @@ class SGGNode(Node):
                                     if pos and current_z is not None:
                                         pos_metri = pixel_to_meters_3d(pos[0], pos[1], current_z, CAMERA_MATRIX)
                                         path.append({'label': label, 'position_pixel': pos, 'position_metri': pos_metri})
+                                        self.pubblica_target(pos)
                                     elif pos:
                                         pos_metri = (pos[0] * SCALA_PIXEL_METRI, pos[1] * SCALA_PIXEL_METRI)
                                         path.append({'label': label, 'position_pixel': pos, 'position_metri': pos_metri})
