@@ -61,3 +61,5 @@ output/
 *.pt
 *.pth
 .venv/
+frames_*.gv
+frames_*.pdf
