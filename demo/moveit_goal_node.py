@@ -135,9 +135,23 @@ class MoveItGoalNode(Node):
 
         constraints = Constraints()
         constraints.position_constraints.append(pos_constraint)
-        # Nota: per ora vincoliamo solo la POSIZIONE, non l'orientamento.
-        # L'orientamento dell'end-effector lo aggiungeremo 
-        # una volta verificato che il robot raggiunge il punto.
+
+        # --- Vincolo di orientamento: end-effector rivolto verso il basso ---
+        # tool0 con asse Z verso il tavolo (approccio dall'alto).
+        # Quaternione (1,0,0,0) = rotazione di 180 gradi attorno a X.
+        from moveit_msgs.msg import OrientationConstraint
+        ori_constraint = OrientationConstraint()
+        ori_constraint.header.frame_id = BASE_FRAME
+        ori_constraint.link_name = EE_LINK
+        ori_constraint.orientation.x = -0.707
+        ori_constraint.orientation.y = 0.707
+        ori_constraint.orientation.z = 0.0
+        ori_constraint.orientation.w = 0.0
+        ori_constraint.absolute_x_axis_tolerance = 0.3
+        ori_constraint.absolute_y_axis_tolerance = 0.3
+        ori_constraint.absolute_z_axis_tolerance = 0.3
+        ori_constraint.weight = 1.0
+        constraints.orientation_constraints.append(ori_constraint)
 
         # --- Richiesta di pianificazione ---
         req = MotionPlanRequest()
