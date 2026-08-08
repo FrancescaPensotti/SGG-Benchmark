@@ -1,3 +1,5 @@
+from time import time
+
 import torch
 import clip
 import cv2
@@ -23,7 +25,13 @@ from demo.aruco_detector import detect_aruco, pixel_to_meters_3d, CAMERA_MATRIX,
 ONNX_PATH = "checkpoints/VG150/react++_yolov8m/model.onnx"
 SIMILARITY_THRESHOLD = 0.85
 FREQ_THRESHOLD = 2
-DISAPPEAR_THRESHOLD = 50
+# Fattore di decay: ad ogni ciclo in cui il nodo non viene rivisto, la sua confidenza
+# viene moltiplicata per questo valore (vicino a 1).
+# Con 0.98: dopo 100 cicli non visti confidence ≈ 0.13, dopo 150 cicli ≈ 0.05.
+CONFIDENCE_DECAY = 0.98
+
+# Soglia sotto la quale il nodo viene rimosso dal grafo (oggetto considerato "perso" davvero).
+CONFIDENCE_REMOVE_THRESHOLD = 0.05
 SCALA_PIXEL_METRI = 0.000435  # fallback se ArUco non visibile, calcolato con z=0.397m
 
 BLACKLIST_OBJECTS = {
@@ -124,6 +132,7 @@ def update_scene_graph(image, bboxes, rels):
             scene_graph[existing_idx]['position_history'].append((cx, cy))
             scene_graph[existing_idx]['position_history'] = scene_graph[existing_idx]['position_history'][-50:]
             scene_graph[existing_idx]['frames_not_seen'] = 0
+            scene_graph[existing_idx]['confidence'] = 1.0          # <-- piena confidenza quando rivisto
             box_to_node[i] = existing_idx
         else:
             new_node = {
@@ -134,7 +143,8 @@ def update_scene_graph(image, bboxes, rels):
                 'position': (cx, cy),
                 'bbox': (x1, y1, x2, y2),
                 'position_history': [(cx, cy)],
-                'frames_not_seen': 0
+                'frames_not_seen': 0,
+                'confidence': 1.0   
             }
             scene_graph.append(new_node)
             box_to_node[i] = len(scene_graph) - 1
@@ -156,14 +166,28 @@ def update_scene_graph(image, bboxes, rels):
                 else:
                     scene_graph[subj_node]['relazioni'][rel_key] = 1
 
+
+      # TODO (estensione futura): il decay qui sotto è "cieco" — si applica sempre,
+        # senza distinguere PERCHÉ il nodo non è stato visto in questo ciclo. Andrebbe
+        # invece congelato (non applicato) quando l'oggetto è plausibilmente ancora
+        # presente ma semplicemente non visibile ora, cioè:
+        #   (a) fuori dal field of view della camera (la camera si è spostata, eye-in-hand),
+        #   (b) occluso da un ostacolo o dal gripper durante il grasping.
+        # Per (a): nota il fatto che conosciamo la posa nota della camera via TF
+        # (base_link -> camera_color_optical_frame); si potrebbe proiettare la
+        # posizione 3D nota del nodo nel frame camera corrente e controllare se cade
+        # dentro i limiti dell'immagine — se fuori, congelare il decay per questo nodo.
+        # Per (b): servirebbe sapere se il gripper sta transitando sopra la posizione
+        # nota del nodo (serve la posa del gripper, non solo la camera).
     seen_nodes = set(box_to_node.values())
     to_remove = []
     for i, node in enumerate(scene_graph):
         if i not in seen_nodes:
-            node['frames_not_seen'] += 1
-            if node['frames_not_seen'] >= DISAPPEAR_THRESHOLD:
-                print(f"  ⚠️ '{node['label']}' sparito dalla scena — probabilmente preso dal robot.")
-                to_remove.append(i)
+          node['frames_not_seen'] += 1
+          node['confidence'] *= CONFIDENCE_DECAY               # <-- decay invece di taglio secco
+          if node['confidence'] < CONFIDENCE_REMOVE_THRESHOLD:
+              print(f"  ⚠️ '{node['label']}' sparito dalla scena — probabilmente preso dal robot.")
+              to_remove.append(i)
 
     for i in sorted(to_remove, reverse=True):
         scene_graph.pop(i)
@@ -206,6 +230,7 @@ class SGGNode(Node):
         self.frame_count = 0
         self.img = None
         self.lock = threading.Lock()
+        self.active_target_label = None   # <--label del target da ripubblicare ad ogni frame
 
         # Subscriber RealSense
         self.subscription = self.create_subscription(
@@ -253,7 +278,9 @@ class SGGNode(Node):
                         p2 = aruco_results[1]['position']
                         dist = np.sqrt((p1[0]-p2[0])**2 + (p1[1]-p2[1])**2 + (p1[2]-p2[2])**2)
                         print(f"  📏 Distanza tra marker: {dist:.3f}m (attesa: 0.20m)")
-                        
+
+                self.republish_active_target()   # <--ripubblica il target attivo, se c'è 
+
     def display_callback(self):
         with self.lock:
             if self.img is not None:
@@ -275,7 +302,30 @@ class SGGNode(Node):
         self.target_pub.publish(msg)
         print(f"  → Target pubblicato su /sgg/target_point: ({pm[0]:.3f}, {pm[1]:.3f}, {current_z:.3f}) [frame camera]")
 
+    def republish_active_target(self):
+        """Ripubblica automaticamente la posizione del target attivo (selezionato con
+        l'ultimo comando 't' o 'g'), finché resta nella scena con confidenza sufficiente.
+        Se il target esce dalla scena o scende sotto soglia, semplicemente non pubblica
+        nulla — lato ET_node questo fa scadere aruco_active in modo naturale, collegando
+        la logica di planning al forgetting factor lato percezione."""
+        if self.active_target_label is None:
+            return
+        for node in scene_graph:
+            if node['label'] == self.active_target_label and node['count'] >= FREQ_THRESHOLD:
+                if node.get('confidence', 0.0) >= CONFIDENCE_REMOVE_THRESHOLD:
+                    pos = node.get('position')
+                if pos:
+                    # Debug temporaneo: misura l'intervallo reale tra due pubblicazioni
+                    # consecutive, per tarare aruco_timeout_ lato ET_node.cpp.
+                    now = time()
+                    if hasattr(self, '_last_republish_time'):
+                        print(f"  ⏱️  Intervallo dall'ultima pubblicazione: {now - self._last_republish_time:.3f}s")
+                    self._last_republish_time = now
 
+                    self.pubblica_target(pos)
+                return
+        # Target non trovato: rimosso per decay, oppure mai stato visto — non pubblichiamo.
+        
     def command_loop(self):
         print("\nComandi disponibili:")
         print("  p → stampa albero semantico")
@@ -309,6 +359,11 @@ class SGGNode(Node):
                     if not target_labels:
                         # fallback: tratta l'input come label esatte
                         target_labels = [l.strip() for l in descrizione.split(',')]
+                    # Il planning gestisce un solo target alla volta: il primo diventa "attivo" e
+                    # viene ripubblicato automaticamente ad ogni frame (vedi republish_active_target).
+                    # Gli altri restano solo nel path stampato, in attesa della gestione multi-goal.
+                    self.active_target_label = target_labels[0] if target_labels else None
+
                     if current_z is not None:
                         path = []
                         for label in target_labels:
@@ -318,7 +373,6 @@ class SGGNode(Node):
                                     if pos:
                                         pos_metri = pixel_to_meters_3d(pos[0], pos[1], current_z, CAMERA_MATRIX)
                                         path.append({'label': label, 'position_pixel': pos, 'position_metri': pos_metri})
-                                        self.pubblica_target(pos)
                                     break
                     else:
                         path = get_path_to_targets_meters(scene_graph, target_labels, SCALA_PIXEL_METRI)
@@ -338,7 +392,14 @@ class SGGNode(Node):
                         print("Gemini non ha trovato oggetti corrispondenti nella scena.")
                     else:
                         print(f"Gemini ha identificato: {target_labels}")
+
+                        # Il planning gestisce un solo target alla volta: il primo diventa "attivo" e
+                        # viene ripubblicato automaticamente ad ogni frame (vedi republish_active_target).
+                        # Gli altri restano solo nel path stampato, in attesa della gestione multi-goal.
+                        self.active_target_label = target_labels[0]
+
                         path = []
+
                         for label in target_labels:
                             for node in scene_graph:
                                 if node['label'] == label and node['count'] >= FREQ_THRESHOLD:
@@ -346,7 +407,6 @@ class SGGNode(Node):
                                     if pos and current_z is not None:
                                         pos_metri = pixel_to_meters_3d(pos[0], pos[1], current_z, CAMERA_MATRIX)
                                         path.append({'label': label, 'position_pixel': pos, 'position_metri': pos_metri})
-                                        self.pubblica_target(pos)
                                     elif pos:
                                         pos_metri = (pos[0] * SCALA_PIXEL_METRI, pos[1] * SCALA_PIXEL_METRI)
                                         path.append({'label': label, 'position_pixel': pos, 'position_metri': pos_metri})
