@@ -138,7 +138,11 @@ class MoveItGoalNode(Node):
 
         # --- Vincolo di orientamento: end-effector rivolto verso il basso ---
         # tool0 con asse Z verso il tavolo (approccio dall'alto).
-        # Quaternione (1,0,0,0) = rotazione di 180 gradi attorno a X.
+        # Quaternione (-0.707, 0.707, 0, 0) = orientamento reale di tool0 letto da
+        # tf2_echo in lab (RPY [180°, 0°, -90°]), non (1,0,0,0) teorico, per l'offset
+        # di montaggio del tool. Validato: inizio/fine traiettoria corretti; il "giro"
+        # intermedio è dovuto al planning OMPL nello spazio dei giunti (non cartesiano) —
+        # verrà risolto passando a pianificazione cartesiana ad attrattori (vedi Energy-Tanks).
         from moveit_msgs.msg import OrientationConstraint
         ori_constraint = OrientationConstraint()
         ori_constraint.header.frame_id = BASE_FRAME
