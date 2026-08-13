@@ -9,6 +9,7 @@ import sys
 import os
 import threading
 from geometry_msgs.msg import PointStamped
+from std_msgs.msg import Bool
 
 # ROS2
 import rclpy
@@ -231,6 +232,9 @@ class SGGNode(Node):
         self.img = None
         self.lock = threading.Lock()
         self.active_target_label = None   # <--label del target da ripubblicare ad ogni frame
+        
+        self.gripper_sub = self.create_subscription(
+    Bool, '/gripper/grasp_confirmed', self.gripper_status_callback, 10)
 
         # Subscriber RealSense
         self.subscription = self.create_subscription(
@@ -301,6 +305,39 @@ class SGGNode(Node):
         msg.point.z = float(current_z)
         self.target_pub.publish(msg)
         print(f"  → Target pubblicato su /sgg/target_point: ({pm[0]:.3f}, {pm[1]:.3f}, {current_z:.3f}) [frame camera]")
+
+    def gripper_status_callback(self, msg: Bool):
+        """Ogni messaggio su questo topic è già un grasp confermato (ET_node ha
+        già verificato transizione + distanza) — nessuna logica di transizione
+        necessaria qui."""
+        if self.active_target_label is None:
+            return
+        self.advance_to_next_object(self.active_target_label)
+
+    def advance_to_next_object(self, grasped_label):
+        """Cerca tra le relazioni del nodo appena graspato quella funzionale
+        con conteggio più alto, e la imposta come nuovo target attivo."""
+        grasped_node = next((n for n in scene_graph if n['label'] == grasped_label), None)
+
+        if grasped_node is None:
+            print(f"  ⚠️ '{grasped_label}' non più nel grafo, nessun proseguimento automatico.")
+            self.active_target_label = None
+            return
+
+        best_rel, best_count = None, 0
+        for (pred, obj_idx), count in grasped_node['relazioni'].items():
+            if pred in VG_TO_FUNCTIONAL and count > best_count:
+                best_rel, best_count = (pred, obj_idx), count
+
+        if best_rel is None:
+            print(f"  ℹ️ Nessuna relazione funzionale per '{grasped_label}': nessun successivo.")
+            self.active_target_label = None
+            return
+
+        pred, obj_idx = best_rel
+        self.active_target_label = scene_graph[obj_idx]['label']
+        print(f"  → Grasp di '{grasped_label}' rilevato. Prossimo target: '{self.active_target_label}' ({pred}, {best_count}x)")
+
 
     def republish_active_target(self):
         """Ripubblica automaticamente la posizione del target attivo (selezionato con
