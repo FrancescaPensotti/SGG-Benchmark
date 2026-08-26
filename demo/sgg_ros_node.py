@@ -221,7 +221,37 @@ def print_scene_graph():
             print(f"       --({pred})--> {scene_graph[obj_idx]['label']} [vista {count}x]")
     print("="*50 + "\n")
 
+def get_candidate_targets(grasped_label=None):
+    """Restituisce la lista di candidati da inviare a ET_node per la
+    combinazione pesata multi-target.
 
+    Se grasped_label è None (cold start / nessun grasp recente): tutti gli
+    oggetti nel grafo con confidenza sufficiente sono candidati — il filtro
+    di raggio dalla posizione del braccio lo applica ET_node, che la conosce.
+
+    Se grasped_label è specificato: solo gli oggetti con relazione
+    funzionale (VG_TO_FUNCTIONAL) verso il nodo appena graspato."""
+
+    if grasped_label is None:
+        return [
+            {'label': n['label'], 'position': n['position']}
+            for n in scene_graph
+            if n['count'] >= FREQ_THRESHOLD and n.get('confidence', 0.0) >= CONFIDENCE_REMOVE_THRESHOLD
+        ]
+
+    grasped_node = next((n for n in scene_graph if n['label'] == grasped_label), None)
+    if grasped_node is None:
+        return []
+
+    candidates = []
+    for (pred, obj_idx), count in grasped_node['relazioni'].items():
+        if pred in VG_TO_FUNCTIONAL:
+            candidates.append({
+                'label': scene_graph[obj_idx]['label'],
+                'position': scene_graph[obj_idx]['position'],
+                'count': count,   # utile come peso iniziale, non solo per il massimo
+            })
+    return candidates
 
 # ── Nodo ROS2 ───────────────────────────────────────────────
 class SGGNode(Node):
