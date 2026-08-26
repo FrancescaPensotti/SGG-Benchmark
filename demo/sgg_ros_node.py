@@ -9,6 +9,7 @@ import sys
 import os
 import threading
 from geometry_msgs.msg import PointStamped
+from geometry_msgs.msg import PoseArray, Pose
 from std_msgs.msg import Bool
 
 # ROS2
@@ -262,6 +263,8 @@ class SGGNode(Node):
         self.img = None
         self.lock = threading.Lock()
         self.active_target_label = None   # <--label del target da ripubblicare ad ogni frame
+        self.candidates_pub = self.create_publisher(PoseArray, '/sgg/candidate_targets', 10)
+
         
         self.gripper_sub = self.create_subscription(
     Bool, '/gripper/grasp_confirmed', self.gripper_status_callback, 10)
@@ -313,7 +316,8 @@ class SGGNode(Node):
                         dist = np.sqrt((p1[0]-p2[0])**2 + (p1[1]-p2[1])**2 + (p1[2]-p2[2])**2)
                         print(f"  📏 Distanza tra marker: {dist:.3f}m (attesa: 0.20m)")
 
-                self.republish_active_target()   # <--ripubblica il target attivo, se c'è 
+                self.republish_active_target()   # ripubblica il target attivo, se c'è
+                self.republish_candidate_targets()   # candidati multipli, solo se nessun comando esplicito attivo
 
     def display_callback(self):
         with self.lock:
@@ -377,21 +381,57 @@ class SGGNode(Node):
         la logica di planning al forgetting factor lato percezione."""
         if self.active_target_label is None:
             return
+
         for node in scene_graph:
             if node['label'] == self.active_target_label and node['count'] >= FREQ_THRESHOLD:
                 if node.get('confidence', 0.0) >= CONFIDENCE_REMOVE_THRESHOLD:
                     pos = node.get('position')
-                if pos:
-                    # Debug temporaneo: misura l'intervallo reale tra due pubblicazioni
-                    # consecutive, per tarare aruco_timeout_ lato ET_node.cpp.
-                    now = time()
-                    if hasattr(self, '_last_republish_time'):
-                        print(f"  ⏱️  Intervallo dall'ultima pubblicazione: {now - self._last_republish_time:.3f}s")
-                    self._last_republish_time = now
+                    if pos:
+                        # Debug temporaneo: misura l'intervallo reale tra due pubblicazioni
+                        # consecutive, per tarare aruco_timeout_ lato ET_node.cpp.
+                        now = time()
+                        if hasattr(self, '_last_republish_time'):
+                            print(f"  ⏱️  Intervallo dall'ultima pubblicazione: {now - self._last_republish_time:.3f}s")
+                        self._last_republish_time = now
 
-                    self.pubblica_target(pos)
+                        self.pubblica_target(pos)
                 return
         # Target non trovato: rimosso per decay, oppure mai stato visto — non pubblichiamo.
+        
+
+    def republish_candidate_targets(self):
+        """Pubblica i candidati multipli SOLO quando non c'è un comando esplicito
+        attivo (active_target_label is None) — altrimenti il comando t/g ha
+        priorità e usa il canale a target singolo esistente (republish_active_target).
+        Non richiede current_z: le posizioni pixel vengono convertite in camera
+        frame usando la stessa logica di pubblica_target, per ogni candidato."""
+        if self.active_target_label is not None:
+            return
+        if current_z is None:
+            return
+
+        candidates = get_candidate_targets(None)
+        if not candidates:
+            return
+
+        msg = PoseArray()
+        msg.header.frame_id = "camera_color_optical_frame"
+        msg.header.stamp = self.get_clock().now().to_msg()
+
+        for cand in candidates:
+            pos_pixel = cand['position']
+            pm = pixel_to_meters_3d(pos_pixel[0], pos_pixel[1], current_z, CAMERA_MATRIX)
+            pose = Pose()
+            pose.position.x = float(pm[0])
+            pose.position.y = float(pm[1])
+            pose.position.z = float(current_z)
+            pose.orientation.w = 1.0
+            msg.poses.append(pose)
+
+        self.candidates_pub.publish(msg)
+
+
+
         
     def command_loop(self):
         print("\nComandi disponibili:")
