@@ -564,7 +564,8 @@ class SGGNode(Node):
                         print("="*50 + "\n")
 
                 elif cmd == 'q':
-                    rclpy.shutdown()
+                    if rclpy.ok():
+                        rclpy.shutdown()
                     break
             except EOFError:
                 break
@@ -581,7 +582,8 @@ def main():
         cv2.destroyAllWindows()
         node.destroy_node()
         print_scene_graph()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
