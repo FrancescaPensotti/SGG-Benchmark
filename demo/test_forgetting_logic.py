@@ -3,6 +3,14 @@
 Test standalone del meccanismo di forgetting factor (confidence decay) e della
 logica di target attivo, SENZA bisogno di ROS/camera. Simula manualmente
 l'aggiornamento del scene_graph nel tempo.
+
+TODO (audit): decay_step() e republish_active_target() qui sotto sono copie a
+mano della logica reale in sgg_ros_node.py (rispettivamente dentro
+update_scene_graph() e SGGNode.republish_active_target()), non chiamano il
+codice reale — quindi possono restare "verdi" anche dopo che l'implementazione
+vera cambia. In particolare, republish_active_target() qui sotto NON controlla
+node['count'] >= FREQ_THRESHOLD come fa invece la versione reale: questo test
+copre solo l'interazione confidence/soglia, non quella con count/FREQ_THRESHOLD.
 """
 
 CONFIDENCE_DECAY = 0.98

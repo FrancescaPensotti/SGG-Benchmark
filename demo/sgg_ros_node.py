@@ -1,5 +1,3 @@
-from time import time
-
 import torch
 import clip
 import cv2
@@ -81,6 +79,14 @@ clip_model, clip_preprocess = clip.load("ViT-B/32", device=device)
 print(f"Pronti! Uso: {device}")
 
 # ── Albero semantico ────────────────────────────────────────
+# TODO (audit): scene_graph e' mutato dentro frame_callback SOTTO self.lock
+# (vedi SGGNode.frame_callback), ma letto/mutato senza lock da command_loop
+# (gli handler p/h/t/g/v leggono scene_graph direttamente) e da
+# gripper_status_callback -> advance_to_next_object. command_loop gira su un
+# threading.Thread separato dal contesto rclpy: un decay/pop concorrente in
+# frame_callback mentre un handler sta iterando scene_graph puo' leggere stato
+# inconsistente o sollevare un'eccezione. Da proteggere con lo stesso self.lock
+# anche in command_loop e in gripper_status_callback/advance_to_next_object.
 scene_graph = []
 current_z = None  # aggiornata quando viene rilevato un marker ArUco
 
@@ -222,37 +228,27 @@ def print_scene_graph():
             print(f"       --({pred})--> {scene_graph[obj_idx]['label']} [vista {count}x]")
     print("="*50 + "\n")
 
-def get_candidate_targets(grasped_label=None):
+def get_candidate_targets():
     """Restituisce la lista di candidati da inviare a ET_node per la
-    combinazione pesata multi-target.
+    combinazione pesata multi-target: tutti gli oggetti nel grafo con
+    confidenza sufficiente (cold start / nessun grasp recente in corso). Il
+    filtro di raggio dalla posizione del braccio lo applica ET_node, che la
+    conosce (qui non c'è la posa del braccio, solo il grafo di scena).
 
-    Se grasped_label è None (cold start / nessun grasp recente): tutti gli
-    oggetti nel grafo con confidenza sufficiente sono candidati — il filtro
-    di raggio dalla posizione del braccio lo applica ET_node, che la conosce.
+    NOTA: in precedenza questa funzione accettava anche un parametro
+    grasped_label per restituire solo gli oggetti con relazione funzionale
+    verso il nodo appena graspato (caso "post-grasp"), ma quel ramo non era
+    mai stato chiamato con un valore diverso da None in questo file: la
+    stessa identica logica ("cerca la relazione funzionale con conteggio più
+    alto verso il nodo graspato") è implementata — ed effettivamente usata —
+    in advance_to_next_object() qui sotto. Rimosso per non avere due
+    implementazioni indipendenti della stessa cosa, di cui una morta."""
 
-    Se grasped_label è specificato: solo gli oggetti con relazione
-    funzionale (VG_TO_FUNCTIONAL) verso il nodo appena graspato."""
-
-    if grasped_label is None:
-        return [
-            {'label': n['label'], 'position': n['position']}
-            for n in scene_graph
-            if n['count'] >= FREQ_THRESHOLD and n.get('confidence', 0.0) >= CONFIDENCE_REMOVE_THRESHOLD
-        ]
-
-    grasped_node = next((n for n in scene_graph if n['label'] == grasped_label), None)
-    if grasped_node is None:
-        return []
-
-    candidates = []
-    for (pred, obj_idx), count in grasped_node['relazioni'].items():
-        if pred in VG_TO_FUNCTIONAL:
-            candidates.append({
-                'label': scene_graph[obj_idx]['label'],
-                'position': scene_graph[obj_idx]['position'],
-                'count': count,   # utile come peso iniziale, non solo per il massimo
-            })
-    return candidates
+    return [
+        {'label': n['label'], 'position': n['position']}
+        for n in scene_graph
+        if n['count'] >= FREQ_THRESHOLD and n.get('confidence', 0.0) >= CONFIDENCE_REMOVE_THRESHOLD
+    ]
 
 # ── Nodo ROS2 ───────────────────────────────────────────────
 class SGGNode(Node):
@@ -263,6 +259,14 @@ class SGGNode(Node):
         self.img = None
         self.lock = threading.Lock()
         self.active_target_label = None   # <--label del target da ripubblicare ad ogni frame
+        # TODO (audit): '/sgg/candidate_targets' e' un letterale qui, che deve
+        # combaciare col default del parametro candidate_targets_topic dichiarato
+        # in ET_node.cpp (repo Energy-Tanks) — stessa cosa per '/sgg/target_point'
+        # più sotto rispetto a sgg_to_et_bridge.py (parametro input_topic) e
+        # moveit_goal_node.py (TARGET_TOPIC). Nessun file di configurazione
+        # condiviso tra le due repo: un refuso in uno dei due punti rompe il
+        # collegamento senza errori a runtime (il subscriber semplicemente non
+        # riceve mai nulla).
         self.candidates_pub = self.create_publisher(PoseArray, '/sgg/candidate_targets', 10)
 
         
@@ -306,9 +310,6 @@ class SGGNode(Node):
                     global current_z, SCALA_PIXEL_METRI
                     current_z = aruco_results[0]['z']
                     SCALA_PIXEL_METRI = calcola_scala_da_aruco(aruco_results[0]['corners'])
-                    # Stampa posizione di ogni marker
-                    #for r in aruco_results:
-                       #print(f"  ArUco ID{r['id']}: x={r['position'][0]:.3f}m, y={r['position'][1]:.3f}m, z={r['position'][2]:.3f}m")
                     # Calibrazione: distanza tra due marker
                     if len(aruco_results) >= 2:
                         p1 = aruco_results[0]['position']
@@ -387,13 +388,6 @@ class SGGNode(Node):
                 if node.get('confidence', 0.0) >= CONFIDENCE_REMOVE_THRESHOLD:
                     pos = node.get('position')
                     if pos:
-                        # Debug temporaneo: misura l'intervallo reale tra due pubblicazioni
-                        # consecutive, per tarare aruco_timeout_ lato ET_node.cpp.
-                        now = time()
-                        if hasattr(self, '_last_republish_time'):
-                            print(f"  ⏱️  Intervallo dall'ultima pubblicazione: {now - self._last_republish_time:.3f}s")
-                        self._last_republish_time = now
-
                         self.pubblica_target(pos)
                 return
         # Target non trovato: rimosso per decay, oppure mai stato visto — non pubblichiamo.
@@ -410,7 +404,7 @@ class SGGNode(Node):
         if current_z is None:
             return
 
-        candidates = get_candidate_targets(None)
+        candidates = get_candidate_targets()
         if not candidates:
             return
 

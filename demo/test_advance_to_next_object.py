@@ -4,6 +4,11 @@ Test standalone della logica di avanzamento verso l'oggetto connesso (Fase C),
 SENZA bisogno di ROS/camera/SGG. Riproduce advance_to_next_object() usando un
 scene_graph finto, per verificare la logica di selezione prima di testarla
 nella catena completa.
+
+TODO (audit): advance_to_next_object_test() qui sotto e' una copia a mano di
+SGGNode.advance_to_next_object() in sgg_ros_node.py, non e' importata da li' —
+una modifica futura al metodo reale non viene rilevata da questo test finche'
+qualcuno non ricorda di rispecchiarla qui.
 """
 
 # Sottoinsieme del dizionario reale, sufficiente per i test.
