@@ -34,6 +34,12 @@ CONFIDENCE_DECAY = 0.98
 CONFIDENCE_REMOVE_THRESHOLD = 0.05
 SCALA_PIXEL_METRI = 0.000435  # fallback se ArUco non visibile, calcolato con z=0.397m
 
+# Margine dal bordo dell'immagine (in pixel) entro cui un oggetto è considerato
+# "vicino al bordo" — se l'ultima posizione nota di un nodo era in questa fascia,
+# è più plausibile che sia appena uscito dal campo visivo (camera eye-in-hand che
+# si è spostata) piuttosto che effettivamente sparito dalla scena.
+EDGE_MARGIN_PX = 40
+
 BLACKLIST_OBJECTS = {
     'floor', 'wall', 'ceiling', 'chair',
     'ground', 'background', 'window', 'door',
@@ -114,6 +120,7 @@ def find_existing_node(label, embedding):
 
 def update_scene_graph(image, bboxes, rels):
     box_to_node = {}
+    frame_height, frame_width = image.shape[:2]
 
     for i, box in enumerate(bboxes):
         cls_idx = int(box[5])
@@ -175,27 +182,57 @@ def update_scene_graph(image, bboxes, rels):
                     scene_graph[subj_node]['relazioni'][rel_key] = 1
 
 
-      # TODO (estensione futura): il decay qui sotto è "cieco" — si applica sempre,
-        # senza distinguere PERCHÉ il nodo non è stato visto in questo ciclo. Andrebbe
-        # invece congelato (non applicato) quando l'oggetto è plausibilmente ancora
-        # presente ma semplicemente non visibile ora, cioè:
-        #   (a) fuori dal field of view della camera (la camera si è spostata, eye-in-hand),
-        #   (b) occluso da un ostacolo o dal gripper durante il grasping.
-        # Per (a): nota il fatto che conosciamo la posa nota della camera via TF
-        # (base_link -> camera_color_optical_frame); si potrebbe proiettare la
-        # posizione 3D nota del nodo nel frame camera corrente e controllare se cade
-        # dentro i limiti dell'immagine — se fuori, congelare il decay per questo nodo.
-        # Per (b): servirebbe sapere se il gripper sta transitando sopra la posizione
-        # nota del nodo (serve la posa del gripper, non solo la camera).
+    # TODO (estensione futura): il decay qui sotto è "cieco" — si applica sempre,
+    # senza distinguere PERCHÉ il nodo non è stato visto in questo ciclo. Andrebbe
+    # invece congelato (non applicato) quando l'oggetto è plausibilmente ancora
+    # presente ma semplicemente non visibile ora, cioè:
+    #   (a) fuori dal field of view della camera (la camera si è spostata, eye-in-hand),
+    #   (b) occluso da un ostacolo o dal gripper durante il grasping.
+    # Per (a): nota il fatto che conosciamo la posa nota della camera via TF
+    # (base_link -> camera_color_optical_frame); si potrebbe proiettare la
+    # posizione 3D nota del nodo nel frame camera corrente e controllare se cade
+    # dentro i limiti dell'immagine — se fuori, congelare il decay per questo nodo.
+    # Per (b): servirebbe sapere se il gripper sta transitando sopra la posizione
+    # nota del nodo (serve la posa del gripper, non solo la camera).
+
     seen_nodes = set(box_to_node.values())
     to_remove = []
     for i, node in enumerate(scene_graph):
         if i not in seen_nodes:
-          node['frames_not_seen'] += 1
-          node['confidence'] *= CONFIDENCE_DECAY               # <-- decay invece di taglio secco
-          if node['confidence'] < CONFIDENCE_REMOVE_THRESHOLD:
-              print(f"  ⚠️ '{node['label']}' sparito dalla scena — probabilmente preso dal robot.")
-              to_remove.append(i)
+            node['frames_not_seen'] += 1
+
+            # Euristica semplificata per il campo visivo (vedi TODO sotto per la
+            # versione corretta, con vera geometria 3D). Qui usiamo solo la
+            # posizione in pixel dell'ultima volta che il nodo è stato visto:
+            # se era vicino al bordo dell'immagine, congeliamo il decay per
+            # questo ciclo invece di applicarlo — l'oggetto potrebbe essere
+            # semplicemente appena uscito dall'inquadratura, non sparito.
+            pos = node.get('position')
+            near_edge = False
+            if pos is not None:
+                px, py = pos
+                near_edge = (
+                    px < EDGE_MARGIN_PX or px > (frame_width - EDGE_MARGIN_PX) or
+                    py < EDGE_MARGIN_PX or py > (frame_height - EDGE_MARGIN_PX)
+)
+            if not near_edge:
+                node['confidence'] *= CONFIDENCE_DECAY
+
+            if node['confidence'] < CONFIDENCE_REMOVE_THRESHOLD:
+                print(f"  ⚠️ '{node['label']}' sparito dalla scena — probabilmente preso dal robot.")
+                to_remove.append(i)
+
+    # TODO (estensione futura, versione corretta): questa euristica sul bordo
+    # dell'immagine è un'approssimazione — un oggetto occluso al centro
+    # dell'inquadratura (es. dal gripper durante il grasping) non viene
+    # riconosciuto e continua comunque a decadere. La versione corretta
+    # richiederebbe: (1) salvare anche la posizione 3D in base_link di ogni nodo
+    # (oggi il grafo conosce solo pixel/posizione relativa alla camera), il che
+    # richiede una sottoscrizione TF in questo nodo Python (non presente oggi);
+    # (2) ad ogni ciclo, per i nodi non visti, riproiettare quella posizione nota
+    # nel frame camera CORRENTE (TF aggiornata) e verificare se cade dentro i
+    # limiti dell'immagine — a quel punto si distinguerebbe correttamente anche
+    # il caso di occlusione (oggetto dietro al gripper), non solo il bordo.
 
     for i in sorted(to_remove, reverse=True):
         scene_graph.pop(i)
