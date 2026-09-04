@@ -91,7 +91,7 @@ class GraspNetNode(Node):
         self.get_logger().info('Trigger ricevuto: RGB-D disponibile, pubblico orientamento placeholder.')
 
         # TODO: qui va innestata l'inferenza vera di GraspNet, quando avremo
-        # accesso alla GPU (VM del Politecnico o PC del tutor). Passi previsti:
+        # accesso alla GPU. Passi previsti:
         #   1. Convertire self.last_color_frame e self.last_depth_frame da
         #      sensor_msgs/Image a array numpy (self.bridge.imgmsg_to_cv2).
         #   2. Estrarre la matrice degli intrinseci da self.last_camera_info.k.
