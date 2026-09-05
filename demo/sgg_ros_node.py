@@ -79,7 +79,7 @@ VG_TO_SPATIAL = {
 
 # ── Carica i modelli ────────────────────────────────────────
 print("Carico SGG-Benchmark...")
-sgg = SGG_ONNX_Model(None, ONNX_PATH)
+sgg = SGG_ONNX_Model(None, ONNX_PATH,tracking=True)
 
 print("Carico CLIP...")
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -130,13 +130,16 @@ IOU_THRESHOLD = 0.3  # sopra questo valore, consideriamo i box "nella stessa pos
 def find_existing_node(label, embedding, bbox):
     for i, node in enumerate(scene_graph):
         if node['label'] == label:
+            # Criterio più forte: stesso ID di traccia dato dal tracker
+            # (OC-SORT/ByteTrack, attivo solo se tracking=True). Basato sul
+            # moto stimato, più robusto di CLIP/IoU quando cambiano luce o
+            # angolo — se combacia, ci fidiamo subito.
+            if track_id is not None and node.get('track_id') == track_id:
+                return i
+
+
             sim = torch.cosine_similarity(node['embedding'], embedding).item()
             iou = compute_iou(node['bbox'], bbox)
-            # Match se l'embedding è simile ABBASTANZA, OPPURE se il box è quasi
-            # nella stessa posizione del frame precedente (recupera i casi in cui
-            # l'embedding CLIP oscilla per luce/angolo, ma l'oggetto non si è
-            # fisicamente spostato — versione base di IoU tracking, senza Kalman
-            # né gestione esplicita di traiettorie).
             if sim >= SIMILARITY_THRESHOLD or iou >= IOU_THRESHOLD:
                 return i
     return -1
@@ -160,7 +163,12 @@ def update_scene_graph(image, bboxes, rels):
         cx = int((x1 + x2) / 2)
         cy = int((y1 + y2) / 2)
 
-        existing_idx = find_existing_node(label, embedding, (x1, y1, x2, y2))
+        # L'ID di traccia (colonna 6) esiste solo se tracking=True è stato
+        # passato a SGG_ONNX_Model — altrimenti box ha solo le colonne
+        # originali (coordinate, score, label) e questo resta None.
+        track_id = int(box[6]) if len(box) > 6 else None
+
+        existing_idx = find_existing_node(label, embedding, (x1, y1, x2, y2),track_id)
 
         if existing_idx >= 0:
             scene_graph[existing_idx]['count'] += 1
@@ -171,6 +179,7 @@ def update_scene_graph(image, bboxes, rels):
             scene_graph[existing_idx]['position_history'] = scene_graph[existing_idx]['position_history'][-50:]
             scene_graph[existing_idx]['frames_not_seen'] = 0
             scene_graph[existing_idx]['confidence'] = 1.0          # <-- piena confidenza quando rivisto
+            scene_graph[existing_idx]['track_id'] = track_id
             box_to_node[i] = existing_idx
         else:
             new_node = {
@@ -182,7 +191,8 @@ def update_scene_graph(image, bboxes, rels):
                 'bbox': (x1, y1, x2, y2),
                 'position_history': [(cx, cy)],
                 'frames_not_seen': 0,
-                'confidence': 1.0   
+                'confidence': 1.0,
+                'track_id': track_id  
             }
             scene_graph.append(new_node)
             box_to_node[i] = len(scene_graph) - 1
