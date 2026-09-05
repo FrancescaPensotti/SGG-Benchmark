@@ -1,3 +1,5 @@
+from cProfile import label
+
 import torch
 import clip
 import cv2
@@ -110,11 +112,32 @@ def get_clip_embedding(image, box):
         emb = emb / emb.norm()
     return emb
 
-def find_existing_node(label, embedding):
+def compute_iou(box1, box2):
+    """Intersection over Union tra due bounding box (x1, y1, x2, y2)."""
+    x1 = max(box1[0], box2[0])
+    y1 = max(box1[1], box2[1])
+    x2 = min(box1[2], box2[2])
+    y2 = min(box1[3], box2[3])
+    inter_area = max(0, x2 - x1) * max(0, y2 - y1)
+    area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
+    area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
+    union = area1 + area2 - inter_area
+    return inter_area / union if union > 0 else 0.0
+
+
+IOU_THRESHOLD = 0.3  # sopra questo valore, consideriamo i box "nella stessa posizione"
+
+def find_existing_node(label, embedding, bbox):
     for i, node in enumerate(scene_graph):
         if node['label'] == label:
             sim = torch.cosine_similarity(node['embedding'], embedding).item()
-            if sim >= SIMILARITY_THRESHOLD:
+            iou = compute_iou(node['bbox'], bbox)
+            # Match se l'embedding è simile ABBASTANZA, OPPURE se il box è quasi
+            # nella stessa posizione del frame precedente (recupera i casi in cui
+            # l'embedding CLIP oscilla per luce/angolo, ma l'oggetto non si è
+            # fisicamente spostato — versione base di IoU tracking, senza Kalman
+            # né gestione esplicita di traiettorie).
+            if sim >= SIMILARITY_THRESHOLD or iou >= IOU_THRESHOLD:
                 return i
     return -1
 
@@ -133,11 +156,11 @@ def update_scene_graph(image, bboxes, rels):
         if embedding is None:
             continue
 
-        existing_idx = find_existing_node(label, embedding)
-
         x1, y1, x2, y2 = map(int, box[:4])
         cx = int((x1 + x2) / 2)
         cy = int((y1 + y2) / 2)
+
+        existing_idx = find_existing_node(label, embedding, (x1, y1, x2, y2))
 
         if existing_idx >= 0:
             scene_graph[existing_idx]['count'] += 1
@@ -360,6 +383,24 @@ class SGGNode(Node):
     def display_callback(self):
         with self.lock:
             if self.img is not None:
+                # Disegna sopra l'immagine (già renderizzata dalla libreria SGG)
+                # anche i nodi con confidenza sufficiente ma non rilevati in
+                # QUESTO frame — usa l'ultima posizione/bbox nota in scene_graph.
+                # Serve a mantenere il riquadro visibile durante lo sfarfallio
+                # del rilevatore (oggetto reale ancora presente, solo non
+                # rilevato in questo specifico frame).
+                display_img = self.img.copy()
+                for node in scene_graph:
+                    if node.get('frames_not_seen', 0) > 0 and node.get('confidence', 0.0) >= CONFIDENCE_REMOVE_THRESHOLD:
+                        bbox = node.get('bbox')
+                        if bbox:
+                            x1, y1, x2, y2 = bbox
+                            # Colore diverso (arancione) per distinguere visivamente
+                            # i nodi "persistenti" da quelli rilevati in questo frame
+                            cv2.rectangle(display_img, (x1, y1), (x2, y2), (0, 165, 255), 2)
+                            cv2.putText(display_img, f"{node['label']} (memoria)", (x1, max(y1 - 10, 0)),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 2)
+
                 cv2.imshow("SGG ROS2 Node", self.img)
                 cv2.waitKey(1)
     
