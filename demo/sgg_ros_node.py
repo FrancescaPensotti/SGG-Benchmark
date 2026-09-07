@@ -127,7 +127,7 @@ def compute_iou(box1, box2):
 
 IOU_THRESHOLD = 0.3  # sopra questo valore, consideriamo i box "nella stessa posizione"
 
-def find_existing_node(label, embedding, bbox):
+def find_existing_node(label, embedding, bbox,track_id=None):
     for i, node in enumerate(scene_graph):
         if node['label'] == label:
             # Criterio più forte: stesso ID di traccia dato dal tracker
