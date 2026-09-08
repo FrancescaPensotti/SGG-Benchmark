@@ -48,9 +48,7 @@ class SggToEtBridge(Node):
         # Orientation Handling ignora questo campo e fa seguire l'orientamento
         # al comando dell'operatore (desired_ee_orientation_), finché GraspNet
         # non sarà integrato.
-        # TODO: quando GraspNet sarà pronto, sostituire questo placeholder fisso
-        # con il quaternione reale calcolato dalla rete a partire dalla posa di
-        # grasp proposta.
+
         pose_msg.pose.orientation.x = 0.0
         pose_msg.pose.orientation.y = 0.0
         pose_msg.pose.orientation.z = 0.0
