@@ -79,7 +79,7 @@ VG_TO_SPATIAL = {
 
 # ── Carica i modelli ────────────────────────────────────────
 print("Carico SGG-Benchmark...")
-sgg = SGG_ONNX_Model(None, ONNX_PATH,tracking=True)
+sgg = SGG_ONNX_Model(None, ONNX_PATH,tracking=False)
 
 print("Carico CLIP...")
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -131,7 +131,7 @@ def find_existing_node(label, embedding, bbox,track_id=None):
     for i, node in enumerate(scene_graph):
         if node['label'] == label:
             # Criterio più forte: stesso ID di traccia dato dal tracker
-            # (OC-SORT/ByteTrack, attivo solo se tracking=True). Basato sul
+            # (OC-SORT/ByteTrack, attivo solo se tracking=true). Basato sul
             # moto stimato, più robusto di CLIP/IoU quando cambiano luce o
             # angolo — se combacia, ci fidiamo subito.
             if track_id is not None and node.get('track_id') == track_id:
@@ -163,7 +163,7 @@ def update_scene_graph(image, bboxes, rels):
         cx = int((x1 + x2) / 2)
         cy = int((y1 + y2) / 2)
 
-        # L'ID di traccia (colonna 6) esiste solo se tracking=True è stato
+        # L'ID di traccia (colonna 6) esiste solo se tracking=true è stato
         # passato a SGG_ONNX_Model — altrimenti box ha solo le colonne
         # originali (coordinate, score, label) e questo resta None.
         track_id = int(box[6]) if len(box) > 6 else None
@@ -505,6 +505,7 @@ class SGGNode(Node):
         print("  h → history posizioni di un oggetto")
         print("  t → path verso oggetti target")
         print("  g → target in linguaggio naturale (Gemini)")
+        print("  x → deseleziona il target attivo")
         print("  v → verifica posizioni (distanze a coppie + z)")
         print("  q → esci\n")
 
@@ -590,7 +591,14 @@ class SGGNode(Node):
                                 print(f"  Step {step+1}: {t['label']} → pixel: {t['position_pixel']} | metri: {t['position_metri']}")
                         else:
                             print("Oggetti identificati ma posizione non disponibile.")
-                
+
+                elif cmd == 'x':
+                    if self.active_target_label is None:
+                        print("Nessun target attivo da deselezionare.")
+                    else:
+                        print(f"  → Deselezionato target attivo: '{self.active_target_label}'")
+                        self.active_target_label = None
+                        
                 elif cmd == 'v':
                     # Verifica posizioni: distanze a coppie + posizione relativa al marker ArUco
                     import itertools
