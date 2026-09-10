@@ -27,6 +27,26 @@ DEPTH_TOPIC = '/camera/camera/aligned_depth_to_color/image_raw'
 CAMERA_INFO_TOPIC = '/camera/camera/color/camera_info'
 
 
+from scipy.spatial.transform import Rotation
+
+def rotation_matrix_to_quaternion(rotation_matrix, current_orientation_xyzw):
+    """Converte la rotation_matrix 3x3 restituita da GraspNet (best_grasp.rotation_matrix,
+    in camera frame) in un quaternione [x, y, z, w]. Include la correzione di segno per
+    il percorso più breve rispetto all'orientamento corrente, stesso principio già usato
+    in graspnetOrientationCallback (ET_node.cpp) e validato in
+    test_standalone/test_rotation_to_quaternion.cpp.
+
+    NON ANCORA CHIAMATA DA NESSUNA PARTE — pronta per quando l'inferenza vera
+    sara' collegata (vedi TODO in trigger_callback)."""
+    quat = Rotation.from_matrix(rotation_matrix).as_quat()
+
+    dot = sum(quat[i] * current_orientation_xyzw[i] for i in range(4))
+    if dot < 0.0:
+        quat = -quat
+
+    return quat
+
+
 class GraspNetNode(Node):
     def __init__(self):
         super().__init__('graspnet_node')
@@ -90,15 +110,16 @@ class GraspNetNode(Node):
 
         self.get_logger().info('Trigger ricevuto: RGB-D disponibile, pubblico orientamento placeholder.')
 
-        # TODO: qui va innestata l'inferenza vera di GraspNet, quando avremo
+        # TODO: qui va innestata l'inferenza vera di GraspNet, quando c'è
         # accesso alla GPU. Passi previsti:
         #   1. Convertire self.last_color_frame e self.last_depth_frame da
         #      sensor_msgs/Image a array numpy (self.bridge.imgmsg_to_cv2).
         #   2. Estrarre la matrice degli intrinseci da self.last_camera_info.k.
         #   3. Eseguire l'inferenza GraspNet (repo in ~/tesi/graspnet-baseline)
         #      per ottenere la posa di grasp proposta.
-        #   4. Convertire gli assi in quaternione (stessa logica già validata
-        #      in test_standalone/test_rotation_to_quaternion.cpp).
+        #   4. Convertire la rotation_matrix in quaternione — RISOLTO:
+        #      usa rotation_matrix_to_quaternion() (definita in cima a questo
+        #      file), gia' pronta, non ancora richiamata qui sotto.
         #   5. Pubblicare il quaternione risultante al posto del placeholder
         #      sotto (già in camera frame — la trasformazione a base_link la
         #      fa ET_node.cpp in graspnetOrientationCallback).
