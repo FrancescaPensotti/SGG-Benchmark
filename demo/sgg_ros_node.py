@@ -16,7 +16,7 @@ from std_msgs.msg import Bool
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image as RosImage
-from cv_bridge import CvBridge
+
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from demo.onnx_model import SGG_ONNX_Model
@@ -99,6 +99,15 @@ scene_graph = []
 current_z = None  # aggiornata quando viene rilevato un marker ArUco
 
 # ── Funzioni ────────────────────────────────────────────────
+
+def imgmsg_to_numpy_bgr8(msg):
+    """Sostituisce cv_bridge.imgmsg_to_cv2(msg, 'bgr8') con una conversione
+    manuale — evita la dipendenza da cv_bridge (compilato contro NumPy 1.x
+    dal sistema ROS2), permettendo a boxmot (che richiede NumPy 2.x) di
+    coesistere senza conflitto."""
+    return np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, 3)
+
+
 def get_clip_embedding(image, box):
     x1, y1, x2, y2 = map(int, box[:4])
     crop = image[y1:y2, x1:x2]
@@ -308,7 +317,6 @@ def get_candidate_targets():
 class SGGNode(Node):
     def __init__(self):
         super().__init__('sgg_node')
-        self.bridge = CvBridge()
         self.frame_count = 0
         self.img = None
         self.lock = threading.Lock()
@@ -347,7 +355,7 @@ class SGGNode(Node):
         self.get_logger().info("SGG Node avviato — in ascolto su /camera/camera/color/image_raw")
 
     def frame_callback(self, msg):
-        frame = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
+        frame = imgmsg_to_numpy_bgr8(msg)
         self.frame_count += 1
 
         if self.frame_count % 5 == 0:
