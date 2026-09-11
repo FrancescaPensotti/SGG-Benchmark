@@ -9,7 +9,7 @@ from flask import Flask, request, jsonify
 # dataset/, utils/ che non sono installati come pacchetti pip, ma vanno
 # aggiunti manualmente al sys.path per essere importabili.
 
-ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = os.path.expanduser("~/graspnet-env/graspnet-baseline")
 sys.path.append(os.path.join(ROOT_DIR, "models"))
 sys.path.append(os.path.join(ROOT_DIR, "dataset"))
 sys.path.append(os.path.join(ROOT_DIR, "utils"))
