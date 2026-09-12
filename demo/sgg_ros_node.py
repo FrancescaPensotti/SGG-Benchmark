@@ -36,6 +36,9 @@ CONFIDENCE_DECAY = 0.98
 CONFIDENCE_REMOVE_THRESHOLD = 0.05
 SCALA_PIXEL_METRI = 0.000435  # fallback se ArUco non visibile, calcolato con z=0.397m
 
+DEPTH_TOPIC = '/camera/camera/aligned_depth_to_color/image_raw'
+DEPTH_WINDOW = 5  # finestra NxN attorno al pixel target per mediare il depth e ridurre il rumore
+
 # Margine dal bordo dell'immagine (in pixel) entro cui un oggetto è considerato
 # "vicino al bordo" — se l'ultima posizione nota di un nodo era in questa fascia,
 # è più plausibile che sia appena uscito dal campo visivo (camera eye-in-hand che
@@ -106,6 +109,32 @@ def imgmsg_to_numpy_bgr8(msg):
     dal sistema ROS2), permettendo a boxmot (che richiede NumPy 2.x) di
     coesistere senza conflitto."""
     return np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, 3)
+
+
+def imgmsg_to_numpy_depth16(msg):
+    """Converte un sensor_msgs/Image in formato 16UC1 (depth allineato della
+    RealSense, valori in millimetri) in un array numpy — stessa logica di
+    imgmsg_to_numpy_bgr8, evita cv_bridge."""
+    return np.frombuffer(msg.data, dtype=np.uint16).reshape(msg.height, msg.width)
+
+
+def read_depth_at_pixel(depth_frame, cx_pixel, cy_pixel, window=DEPTH_WINDOW):
+    """Legge la profondita' reale (in metri) mediando una finestra NxN attorno
+    al pixel dato — un solo pixel sarebbe troppo rumoroso. Scarta gli zeri
+    (letture invalide/mancanti della RealSense) e usa la mediana, piu' robusta
+    della media in presenza di outlier. Restituisce None se nella finestra non
+    c'e' nessuna lettura valida (es. troppo vicino al limite operativo del
+    sensore, tipicamente ~20cm)."""
+    h, w = depth_frame.shape
+    half = window // 2
+    x0, x1 = max(0, int(cx_pixel) - half), min(w, int(cx_pixel) + half + 1)
+    y0, y1 = max(0, int(cy_pixel) - half), min(h, int(cy_pixel) + half + 1)
+    patch = depth_frame[y0:y1, x0:x1].astype(np.float32)
+    valid = patch[patch > 0]
+    if valid.size == 0:
+        return None
+    depth_mm = np.median(valid)
+    return depth_mm / 1000.0  # mm -> metri (formato Z16 standard RealSense)
 
 
 def get_clip_embedding(image, box):
@@ -341,7 +370,14 @@ class SGGNode(Node):
             '/camera/camera/color/image_raw',
             self.frame_callback,
             10)
-        
+
+        self.last_depth_frame = None
+        self.depth_sub = self.create_subscription(
+            RosImage,
+            DEPTH_TOPIC,
+            self.depth_callback,
+            10)
+
         # Publisher della posizione del target verso il nodo MoveIt
         self.target_pub = self.create_publisher(PointStamped, '/sgg/target_point', 10)
 
@@ -353,6 +389,9 @@ class SGGNode(Node):
         self.cmd_thread.start()
 
         self.get_logger().info("SGG Node avviato — in ascolto su /camera/camera/color/image_raw")
+
+    def depth_callback(self, msg):
+        self.last_depth_frame = imgmsg_to_numpy_depth16(msg)
 
     def frame_callback(self, msg):
         frame = imgmsg_to_numpy_bgr8(msg)
@@ -368,8 +407,8 @@ class SGGNode(Node):
 
                 # Rileva ArUco e aggiorna Z e scala
                 aruco_results, _, _ = detect_aruco(frame)
+                global current_z, SCALA_PIXEL_METRI
                 if aruco_results:
-                    global current_z, SCALA_PIXEL_METRI
                     current_z = aruco_results[0]['z']
                     SCALA_PIXEL_METRI = calcola_scala_da_aruco(aruco_results[0]['corners'])
                     # Calibrazione: distanza tra due marker
@@ -378,6 +417,25 @@ class SGGNode(Node):
                         p2 = aruco_results[1]['position']
                         dist = np.sqrt((p1[0]-p2[0])**2 + (p1[1]-p2[1])**2 + (p1[2]-p2[2])**2)
                         print(f"  📏 Distanza tra marker: {dist:.3f}m (attesa: 0.20m)")
+                elif self.last_depth_frame is not None and self.active_target_label is not None:
+                    # ArUco non visibile (probabilmente fuori campo per avvicinamento
+                    # ravvicinato) — fallback sulla depth reale della RealSense, letta
+                    # nel pixel del target attivo. A differenza del piano comune
+                    # dato da ArUco, qui la profondita' e' quella vera dell'oggetto
+                    # target, non un'approssimazione condivisa per tutta la scena.
+                    # Limitato al caso con target attivo esplicito (comando t/g o
+                    # avanzamento post-grasp): durante la fase di ambiguita'
+                    # multi-candidato l'ArUco tipicamente e' ancora visibile (il
+                    # braccio non si e' ancora impegnato su un singolo oggetto
+                    # abbastanza da uscire dal campo visivo), quindi i due scenari
+                    # (ArUco perso vs. candidati multipli ancora ambigui) non si
+                    # sovrappongono in pratica — non serve estendere la condizione.
+                    target_node = next((n for n in scene_graph if n['label'] == self.active_target_label), None)
+                    if target_node is not None and target_node.get('position') is not None:
+                        pos_pixel = target_node['position']
+                        depth_m = read_depth_at_pixel(self.last_depth_frame, pos_pixel[0], pos_pixel[1])
+                        if depth_m is not None:
+                            current_z = depth_m
 
                 self.republish_active_target()   # ripubblica il target attivo, se c'è
                 self.republish_candidate_targets()   # candidati multipli, solo se nessun comando esplicito attivo
