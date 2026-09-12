@@ -168,27 +168,30 @@ class GraspNetNode(Node):
         rotation_matrix = np.array(result['rotation_matrix'])
         # Orientamento corrente del gripper, come riferimento per la
         # correzione di segno (percorso piu' breve) dentro
-        # rotation_matrix_to_quaternion(). Placeholder identita' — verificato
-        # (12/09): NON sostituibile con un tf2 lookup diretto come in
-        # moveit_goal_node.py (che usa tf2_ros.Buffer/TransformListener per
-        # base_link->tool0). Qui serve un riferimento nello STESSO frame di
-        # rotation_matrix, che la docstring di rotation_matrix_to_quaternion()
-        # dichiara esplicitamente "in camera frame" — non base_link. tool0 in
-        # base_link (il valore validato in moveit_goal_node.py) sarebbe quindi
-        # un riferimento nel frame sbagliato: userebbe una correzione di segno
-        # scorretta, peggio del placeholder identita' attuale (che almeno e'
-        # un no-op trasparente). Nota collaterale emersa verificando questo:
-        # graspnetOrientationCallback in ET_node.cpp riceve questo stesso
-        # quaternione e lo usa direttamente come desired_ee_ori_acs_ (frame
-        # base_link, nessuna trasformazione applicata) nonostante il messaggio
-        # dichiari frame_id='camera_color_optical_frame' — possibile
-        # disallineamento di convenzione tra le due repo, da chiarire con
-        # Alessandro prima di toccare l'una o l'altra parte. TODO: per fixare
-        # questo placeholder serve prima stabilire il vero frame di
-        # rotation_matrix (chiedere a chi ha scritto grasp_server.py / la
-        # repo graspnet-baseline) e, se serve davvero camera frame, non esiste
-        # ancora una fonte per l'orientamento della camera in quel frame in
-        # questa repo.
+        # rotation_matrix_to_quaternion(). Placeholder identita'.
+        #
+        # CORREZIONE (12/09): la nota precedente qui diceva che
+        # graspnetOrientationCallback (ET_node.cpp) usasse questo quaternione
+        # direttamente come base_link, senza trasformarlo -- era sbagliata,
+        # basata su una versione vecchia del file. Verificato ora sul codice
+        # reale: quella callback compone gia' correttamente
+        # ee_orientation_ * camera_to_tool0_ * q_camera_frame (stessa
+        # convenzione "camera frame" dichiarata qui), con test di
+        # autoconsistenza algebrica in
+        # test_standalone/test_camera_to_baselink_orientation.cpp. Non c'e'
+        # quindi nessun disallineamento di frame da chiarire con Alessandro:
+        # mi ero fidata di un ricordo della conversazione invece di
+        # rileggere il file aggiornato, errore mio.
+        #
+        # Resta un placeholder identita', ma per un motivo diverso e minore:
+        # rotation_matrix_to_quaternion() cerca il percorso piu' breve
+        # rispetto a un orientamento "corrente" per evitare un salto tra due
+        # rappresentazioni equivalenti del quaternione (doppio ricoprimento) --
+        # qui non c'e' uno stato persistente tra una chiamata e la successiva
+        # (trigger_callback parte sempre da zero) con cui confrontare, quindi
+        # l'identita' resta la scelta piu' semplice finche' non si decide se
+        # vale la pena mantenere l'ultimo orientamento pubblicato come
+        # riferimento tra una chiamata e l'altra.
         current_orientation_xyzw = [0.0, 0.0, 0.0, 1.0]
         quat = rotation_matrix_to_quaternion(rotation_matrix, current_orientation_xyzw)
 

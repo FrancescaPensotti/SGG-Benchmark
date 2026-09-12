@@ -72,7 +72,20 @@ class SGG_ONNX_Model(SGG_Model):
         
         self.last_time = 0
         if self.tracking:
-            from boxmot import OcSort
+            # Import aggiornato (12/09): `from boxmot import OcSort` non funziona
+            # piu' con boxmot 21.0.0 (installato nel venv) -- il pacchetto e'
+            # stato ristrutturato, OcSort non e' piu' esposto a livello top.
+            # Verificato: il nuovo percorso importa correttamente e il
+            # costruttore sotto accetta ancora gli stessi kwargs (incluso
+            # asso_threshold, assorbito nei **kwargs di BaseTracker) senza
+            # errori. NON verificato: se il layout delle colonne restituite da
+            # tracker.update() (usato piu' sotto, es. track[4]/track[7]) sia
+            # ancora lo stesso -- richiede un test con detection reali, non
+            # fattibile senza una camera/frame vero. La causa originale per cui
+            # tracking era disabilitato (conflitto numpy 1.x/2.x con
+            # cv_bridge) e' comunque risolta: sgg_ros_node.py non importa piu'
+            # cv_bridge da nessuna parte.
+            from boxmot.trackers.bbox.ocsort.ocsort import OcSort
             self.tracker = OcSort(per_class=True, det_thresh=0, max_age=20, min_hits=1, asso_threshold=0.2, delta_t=2, asso_func='giou', inertia=0.2, use_byte=True)
 
         self.pre_time_bench = []
