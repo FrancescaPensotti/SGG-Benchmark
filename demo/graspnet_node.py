@@ -20,14 +20,26 @@ from std_msgs.msg import Bool
 from geometry_msgs.msg import QuaternionStamped
 from sensor_msgs.msg import Image, CameraInfo
 from cv_bridge import CvBridge
-
+import numpy as np
 
 COLOR_TOPIC = '/camera/camera/color/image_raw'
 DEPTH_TOPIC = '/camera/camera/aligned_depth_to_color/image_raw'
 CAMERA_INFO_TOPIC = '/camera/camera/color/camera_info'
 
+# Endpoint del server di inferenza GraspNet, in ascolto sulla VM GPU
+# (rocco-gpu-1). Richiede connessione VPN GlobalProtect attiva.
+GRASP_SERVER_URL = "http://10.75.4.28:5001/predict_grasp"
+
+# Soglie di profondita' (mm) per isolare la zona di lavoro. TODO: tarare
+# empiricamente in lab — questi sono valori di partenza plausibili per
+# la fase di grasp (braccio gia' vicino all'oggetto), non ancora validati.
+DEPTH_MIN_MM = 100
+DEPTH_MAX_MM = 400
+
 
 from scipy.spatial.transform import Rotation
+import base64
+import requests
 
 def rotation_matrix_to_quaternion(rotation_matrix, current_orientation_xyzw):
     """Converte la rotation_matrix 3x3 restituita da GraspNet (best_grasp.rotation_matrix,
@@ -108,34 +120,89 @@ class GraspNetNode(Node):
                 )
             return
 
-        self.get_logger().info('Trigger ricevuto: RGB-D disponibile, pubblico orientamento placeholder.')
+        self.get_logger().info('Trigger ricevuto: chiamo il server GraspNet sulla VM.')
 
-        # TODO: qui va innestata l'inferenza vera di GraspNet, quando c'è
-        # accesso alla GPU. Passi previsti:
-        #   1. Convertire self.last_color_frame e self.last_depth_frame da
-        #      sensor_msgs/Image a array numpy (self.bridge.imgmsg_to_cv2).
-        #   2. Estrarre la matrice degli intrinseci da self.last_camera_info.k.
-        #   3. Eseguire l'inferenza GraspNet (repo in ~/tesi/graspnet-baseline)
-        #      per ottenere la posa di grasp proposta.
-        #   4. Convertire la rotation_matrix in quaternione — RISOLTO:
-        #      usa rotation_matrix_to_quaternion() (definita in cima a questo
-        #      file), gia' pronta, non ancora richiamata qui sotto.
-        #   5. Pubblicare il quaternione risultante al posto del placeholder
-        #      sotto (già in camera frame — la trasformazione a base_link la
-        #      fa ET_node.cpp in graspnetOrientationCallback).
+        # --- 1. Conversione dei messaggi ROS in array numpy ---
+        # cv_bridge usato qui (non rimosso come in sgg_ros_node.py) — se in
+        # futuro emergesse lo stesso conflitto NumPy 1.x/2.x gia' visto
+        # altrove, sostituire con conversione manuale come fatto la'.
+        color_img = self.bridge.imgmsg_to_cv2(self.last_color_frame, desired_encoding='bgr8')
+        depth_img = self.bridge.imgmsg_to_cv2(self.last_depth_frame, desired_encoding='passthrough')
+        depth_img = depth_img.astype('float32')
 
-        # PLACEHOLDER: quaternione ruotato di 90° attorno a Z rispetto
-        # all'identità, scelto apposta diverso da (0,0,0,1) per verificare
-        # visivamente che il braccio reagisca al messaggio.
+        # --- 2. Estrazione intrinseci dalla CameraInfo ---
+        # msg.k e' una matrice 3x3 appiattita in row-major:
+        # [fx, 0, cx, 0, fy, cy, 0, 0, 1]
+        k = self.last_camera_info.k
+        fx, fy, cx, cy = k[0], k[4], k[2], k[5]
+
+        # --- 3. Chiamata HTTP al server GraspNet sulla VM ---
+        def encode(array):
+            return base64.b64encode(array.tobytes()).decode('utf-8')
+
+        payload = {
+            'color': encode(color_img), 'color_shape': list(color_img.shape), 'color_dtype': str(color_img.dtype),
+            'depth': encode(depth_img), 'depth_shape': list(depth_img.shape), 'depth_dtype': str(depth_img.dtype),
+            'fx': float(fx), 'fy': float(fy), 'cx': float(cx), 'cy': float(cy),
+            'depth_scale': 0.001,  # 1mm per unita' — confermato: e' il formato standard
+                                    # Z16 di /camera/camera/aligned_depth_to_color/image_raw
+                                    # (uint16, valori in mm), stesso topic e stessa assunzione
+                                    # usati da imgmsg_to_numpy_depth16() in sgg_ros_node.py.
+            'depth_min_mm': DEPTH_MIN_MM, 'depth_max_mm': DEPTH_MAX_MM,
+        }
+
+        try:
+            resp = requests.post(GRASP_SERVER_URL, json=payload, timeout=10.0)
+            resp.raise_for_status()
+            result = resp.json()
+        except requests.exceptions.RequestException as exc:
+            # Copre: VM irraggiungibile, VPN spenta, timeout, server giu'.
+            self.get_logger().error(f'Chiamata al server GraspNet fallita: {exc}')
+            return
+
+        if not result.get('success'):
+            self.get_logger().warn(f"GraspNet non ha prodotto un grasp valido: {result.get('reason')}")
+            return
+
+        # --- 4. Conversione rotation_matrix -> quaternione ---
+        rotation_matrix = np.array(result['rotation_matrix'])
+        # Orientamento corrente del gripper, come riferimento per la
+        # correzione di segno (percorso piu' breve) dentro
+        # rotation_matrix_to_quaternion(). Placeholder identita' — verificato
+        # (12/09): NON sostituibile con un tf2 lookup diretto come in
+        # moveit_goal_node.py (che usa tf2_ros.Buffer/TransformListener per
+        # base_link->tool0). Qui serve un riferimento nello STESSO frame di
+        # rotation_matrix, che la docstring di rotation_matrix_to_quaternion()
+        # dichiara esplicitamente "in camera frame" — non base_link. tool0 in
+        # base_link (il valore validato in moveit_goal_node.py) sarebbe quindi
+        # un riferimento nel frame sbagliato: userebbe una correzione di segno
+        # scorretta, peggio del placeholder identita' attuale (che almeno e'
+        # un no-op trasparente). Nota collaterale emersa verificando questo:
+        # graspnetOrientationCallback in ET_node.cpp riceve questo stesso
+        # quaternione e lo usa direttamente come desired_ee_ori_acs_ (frame
+        # base_link, nessuna trasformazione applicata) nonostante il messaggio
+        # dichiari frame_id='camera_color_optical_frame' — possibile
+        # disallineamento di convenzione tra le due repo, da chiarire con
+        # Alessandro prima di toccare l'una o l'altra parte. TODO: per fixare
+        # questo placeholder serve prima stabilire il vero frame di
+        # rotation_matrix (chiedere a chi ha scritto grasp_server.py / la
+        # repo graspnet-baseline) e, se serve davvero camera frame, non esiste
+        # ancora una fonte per l'orientamento della camera in quel frame in
+        # questa repo.
+        current_orientation_xyzw = [0.0, 0.0, 0.0, 1.0]
+        quat = rotation_matrix_to_quaternion(rotation_matrix, current_orientation_xyzw)
+
+        # --- 5. Pubblicazione ---
         orientation_msg = QuaternionStamped()
         orientation_msg.header.stamp = self.get_clock().now().to_msg()
         orientation_msg.header.frame_id = 'camera_color_optical_frame'
-        orientation_msg.quaternion.x = 0.0
-        orientation_msg.quaternion.y = 0.0
-        orientation_msg.quaternion.z = 0.7071
-        orientation_msg.quaternion.w = 0.7071
+        orientation_msg.quaternion.x = float(quat[0])
+        orientation_msg.quaternion.y = float(quat[1])
+        orientation_msg.quaternion.z = float(quat[2])
+        orientation_msg.quaternion.w = float(quat[3])
 
         self.pub.publish(orientation_msg)
+        self.get_logger().info(f"Grasp pubblicato (score={result['score']:.3f}).")
 
 
 def main(args=None):
