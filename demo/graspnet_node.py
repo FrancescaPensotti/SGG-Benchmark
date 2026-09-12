@@ -48,8 +48,8 @@ def rotation_matrix_to_quaternion(rotation_matrix, current_orientation_xyzw):
     in graspnetOrientationCallback (ET_node.cpp) e validato in
     test_standalone/test_rotation_to_quaternion.cpp.
 
-    NON ANCORA CHIAMATA DA NESSUNA PARTE — pronta per quando l'inferenza vera
-    sara' collegata (vedi TODO in trigger_callback)."""
+    Chiamata da trigger_callback dopo la risposta del server GraspNet (vedi
+    sopra in questo file)."""
     quat = Rotation.from_matrix(rotation_matrix).as_quat()
 
     dot = sum(quat[i] * current_orientation_xyzw[i] for i in range(4))

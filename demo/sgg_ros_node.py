@@ -90,14 +90,20 @@ clip_model, clip_preprocess = clip.load("ViT-B/32", device=device)
 print(f"Pronti! Uso: {device}")
 
 # ── Albero semantico ────────────────────────────────────────
-# TODO (audit): scene_graph e' mutato dentro frame_callback SOTTO self.lock
-# (vedi SGGNode.frame_callback), ma letto/mutato senza lock da command_loop
-# (gli handler p/h/t/g/v leggono scene_graph direttamente) e da
-# gripper_status_callback -> advance_to_next_object. command_loop gira su un
-# threading.Thread separato dal contesto rclpy: un decay/pop concorrente in
-# frame_callback mentre un handler sta iterando scene_graph puo' leggere stato
-# inconsistente o sollevare un'eccezione. Da proteggere con lo stesso self.lock
-# anche in command_loop e in gripper_status_callback/advance_to_next_object.
+# scene_graph e' mutato dentro frame_callback SOTTO self.lock (vedi
+# SGGNode.frame_callback). L'unica vera race era con command_loop, che gira su
+# un threading.Thread separato dal contesto rclpy: un decay/pop concorrente in
+# frame_callback mentre un handler (p/h/t/g/v) stava iterando scene_graph
+# poteva leggere stato inconsistente o sollevare un'eccezione. Corretto
+# (12/09): ogni handler ora prende uno snapshot (list(scene_graph)) sotto
+# self.lock subito dopo l'ultimo input()/chiamata di rete bloccante, e lavora
+# sulla copia — il lock non resta mai tenuto durante un'attesa da tastiera o
+# una chiamata a Gemini, altrimenti bloccherebbe frame_callback per tutto quel
+# tempo. gripper_status_callback -> advance_to_next_object, nonostante letto in
+# precedenza come a rischio, NON e' in race: main() usa rclpy.spin() a singolo
+# thread, quindi gira sempre serializzato rispetto a frame_callback (nessuna
+# concorrenza reale tra due callback rclpy in questo nodo, solo tra i callback
+# rclpy nel loro insieme e command_loop).
 scene_graph = []
 current_z = None  # aggiornata quando viene rilevato un marker ArUco
 
@@ -292,11 +298,17 @@ def update_scene_graph(image, bboxes, rels):
     for i in sorted(to_remove, reverse=True):
         scene_graph.pop(i)
 
-def print_scene_graph():
+def print_scene_graph(sg=None):
+    """sg: snapshot opzionale di scene_graph (vedi command_loop, che ne prende
+    uno sotto lock prima di chiamare questa funzione da un thread diverso da
+    quello rclpy). None = usa la globale direttamente, sicuro solo se non c'e'
+    concorrenza (es. allo shutdown in main())."""
+    if sg is None:
+        sg = scene_graph
     print("\n" + "="*50)
-    print(f"ALBERO SEMANTICO — {len(scene_graph)} oggetti nella scena")
+    print(f"ALBERO SEMANTICO — {len(sg)} oggetti nella scena")
     print("="*50)
-    for i, node in enumerate(scene_graph):
+    for i, node in enumerate(sg):
         if node['count'] < FREQ_THRESHOLD:
             continue
         pos = node.get('position', (0, 0))
@@ -317,7 +329,7 @@ def print_scene_graph():
                 continue
             if pred not in VG_TO_FUNCTIONAL and pred not in VG_TO_SPATIAL:
                 continue
-            print(f"       --({pred})--> {scene_graph[obj_idx]['label']} [vista {count}x]")
+            print(f"       --({pred})--> {sg[obj_idx]['label']} [vista {count}x]")
     print("="*50 + "\n")
 
 def get_candidate_targets():
@@ -591,22 +603,32 @@ class SGGNode(Node):
             try:
                 cmd = input("Comando: ").strip().lower()
                 if cmd == 'p':
-                    print_scene_graph()
+                    with self.lock:
+                        sg = list(scene_graph)
+                    print_scene_graph(sg)
                 elif cmd == 'h':
                     descrizione = input("Di quale oggetto vuoi la history? (puoi descriverlo a parole tue) ")
+                    # Snapshot preso QUI, dopo l'input() bloccante e prima di
+                    # leggere scene_graph, cosi' il lock non resta mai tenuto
+                    # durante un'attesa da tastiera o una chiamata di rete a
+                    # Gemini (vedi TODO piu' sopra sulla race con frame_callback).
+                    with self.lock:
+                        sg = list(scene_graph)
                     from demo.gemini_retrieval import scene_graph_to_json, resolve_targets
-                    scene_json = scene_graph_to_json(scene_graph, FREQ_THRESHOLD)
+                    scene_json = scene_graph_to_json(sg, FREQ_THRESHOLD)
                     labels = resolve_targets(descrizione, scene_json)
                     label = labels[0] if labels else descrizione
-                    history = get_position_history(scene_graph, label)
+                    history = get_position_history(sg, label)
                     if history:
                         print(f"History di '{label}': {history}")
                     else:
                         print(f"Oggetto '{label}' non trovato nella scena.")
                 elif cmd == 't':
                     descrizione = input("Oggetti target (puoi descriverli a parole tue, separati da virgola): ")
+                    with self.lock:
+                        sg = list(scene_graph)
                     from demo.gemini_retrieval import scene_graph_to_json, resolve_targets
-                    scene_json = scene_graph_to_json(scene_graph, FREQ_THRESHOLD)
+                    scene_json = scene_graph_to_json(sg, FREQ_THRESHOLD)
                     target_labels = resolve_targets(descrizione, scene_json)
                     if not target_labels:
                         # fallback: tratta l'input come label esatte
@@ -619,7 +641,7 @@ class SGGNode(Node):
                     if current_z is not None:
                         path = []
                         for label in target_labels:
-                            for node in scene_graph:
+                            for node in sg:
                                 if node['label'] == label and node['count'] >= FREQ_THRESHOLD:
                                     pos = node.get('position')
                                     if pos:
@@ -627,7 +649,7 @@ class SGGNode(Node):
                                         path.append({'label': label, 'position_pixel': pos, 'position_metri': pos_metri})
                                     break
                     else:
-                        path = get_path_to_targets_meters(scene_graph, target_labels, SCALA_PIXEL_METRI)
+                        path = get_path_to_targets_meters(sg, target_labels, SCALA_PIXEL_METRI)
                     if path:
                         print("\nPATH VERSO GLI OBIETTIVI:")
                         for step, target in enumerate(path):
@@ -638,7 +660,9 @@ class SGGNode(Node):
                 elif cmd == 'g':
                     from demo.gemini_retrieval import scene_graph_to_json, resolve_targets
                     descrizione = input("Descrivi il target a parole tue: ")
-                    scene_json = scene_graph_to_json(scene_graph, FREQ_THRESHOLD)
+                    with self.lock:
+                        sg = list(scene_graph)
+                    scene_json = scene_graph_to_json(sg, FREQ_THRESHOLD)
                     target_labels = resolve_targets(descrizione, scene_json)
                     if not target_labels:
                         print("Gemini non ha trovato oggetti corrispondenti nella scena.")
@@ -653,7 +677,7 @@ class SGGNode(Node):
                         path = []
 
                         for label in target_labels:
-                            for node in scene_graph:
+                            for node in sg:
                                 if node['label'] == label and node['count'] >= FREQ_THRESHOLD:
                                     pos = node.get('position')
                                     if pos and current_z is not None:
@@ -680,8 +704,10 @@ class SGGNode(Node):
                 elif cmd == 'v':
                     # Verifica posizioni: distanze a coppie + posizione relativa al marker ArUco
                     import itertools
+                    with self.lock:
+                        sg = list(scene_graph)
                     oggetti = []
-                    for node in scene_graph:
+                    for node in sg:
                         if node['count'] >= FREQ_THRESHOLD and node.get('position'):
                             pos = node['position']
                             if current_z is not None:

@@ -18,6 +18,13 @@ class SggToEtBridge(Node):
     def __init__(self):
         super().__init__('sgg_to_et_bridge')
 
+        # TODO (audit): questi due letterali devono combaciare rispettivamente
+        # col publisher target_pub in sgg_ros_node.py (input_topic) e col
+        # parametro aruco_pose_topic dichiarato in ET_node.cpp, repo
+        # Energy-Tanks (output_topic) — stesso problema gia' segnato in
+        # entrambi quei file: nessuna fonte unica di verita' tra le due repo,
+        # un refuso in uno dei tre punti rompe il collegamento senza errori a
+        # runtime.
         self.declare_parameter('input_topic', '/sgg/target_point')
         self.declare_parameter('output_topic', '/aruco_detector/target_pose_camera_frame')
 
