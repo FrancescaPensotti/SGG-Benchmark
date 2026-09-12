@@ -417,22 +417,34 @@ class SGGNode(Node):
                         p2 = aruco_results[1]['position']
                         dist = np.sqrt((p1[0]-p2[0])**2 + (p1[1]-p2[1])**2 + (p1[2]-p2[2])**2)
                         print(f"  📏 Distanza tra marker: {dist:.3f}m (attesa: 0.20m)")
-                elif self.last_depth_frame is not None and self.active_target_label is not None:
+                elif self.last_depth_frame is not None:
                     # ArUco non visibile (probabilmente fuori campo per avvicinamento
                     # ravvicinato) — fallback sulla depth reale della RealSense, letta
                     # nel pixel del target attivo. A differenza del piano comune
                     # dato da ArUco, qui la profondita' e' quella vera dell'oggetto
                     # target, non un'approssimazione condivisa per tutta la scena.
-                    # Limitato al caso con target attivo esplicito (comando t/g o
-                    # avanzamento post-grasp): durante la fase di ambiguita'
-                    # multi-candidato l'ArUco tipicamente e' ancora visibile (il
-                    # braccio non si e' ancora impegnato su un singolo oggetto
-                    # abbastanza da uscire dal campo visivo), quindi i due scenari
-                    # (ArUco perso vs. candidati multipli ancora ambigui) non si
-                    # sovrappongono in pratica — non serve estendere la condizione.
-                    target_node = next((n for n in scene_graph if n['label'] == self.active_target_label), None)
-                    if target_node is not None and target_node.get('position') is not None:
-                        pos_pixel = target_node['position']
+                    #
+                    # Due casi in cui sappiamo SENZA ambiguita' quale pixel campionare:
+                    # 1) target attivo esplicito (comando t/g o avanzamento post-grasp);
+                    # 2) nessun comando esplicito, ma get_candidate_targets() e' sceso a
+                    #    un solo candidato — stesso segnale gia' usato da
+                    #    republish_candidate_targets() qui sotto, quindi nessuna logica
+                    #    nuova, solo riuso. Con 2+ candidati restiamo davvero ambigui
+                    #    (non sapremmo su quale pixel campionare: ET_node sceglie il
+                    #    vincitore per allineamento col comando master, un'informazione
+                    #    che qui non abbiamo) e non applichiamo il fallback — current_z
+                    #    resta quello che era, comportamento invariato in quel caso.
+                    pos_pixel = None
+                    if self.active_target_label is not None:
+                        target_node = next((n for n in scene_graph if n['label'] == self.active_target_label), None)
+                        if target_node is not None and target_node.get('position') is not None:
+                            pos_pixel = target_node['position']
+                    else:
+                        candidates = get_candidate_targets()
+                        if len(candidates) == 1:
+                            pos_pixel = candidates[0]['position']
+
+                    if pos_pixel is not None:
                         depth_m = read_depth_at_pixel(self.last_depth_frame, pos_pixel[0], pos_pixel[1])
                         if depth_m is not None:
                             current_z = depth_m
