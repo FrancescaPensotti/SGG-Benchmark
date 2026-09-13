@@ -170,20 +170,13 @@ class GraspNetNode(Node):
         # correzione di segno (percorso piu' breve) dentro
         # rotation_matrix_to_quaternion(). Placeholder identita'.
         #
-        # CORREZIONE (12/09): la nota precedente qui diceva che
-        # graspnetOrientationCallback (ET_node.cpp) usasse questo quaternione
-        # direttamente come base_link, senza trasformarlo -- era sbagliata,
-        # basata su una versione vecchia del file. Verificato ora sul codice
-        # reale: quella callback compone gia' correttamente
+        # graspnetOrientationCallback (ET_node.cpp) compone gia' correttamente
         # ee_orientation_ * camera_to_tool0_ * q_camera_frame (stessa
-        # convenzione "camera frame" dichiarata qui), con test di
-        # autoconsistenza algebrica in
-        # test_standalone/test_camera_to_baselink_orientation.cpp. Non c'e'
-        # quindi nessun disallineamento di frame da chiarire con Alessandro:
-        # mi ero fidata di un ricordo della conversazione invece di
-        # rileggere il file aggiornato, errore mio.
+        # convenzione "camera frame" usata qui), con test di autoconsistenza
+        # algebrica in test_standalone/test_camera_to_baselink_orientation.cpp
+        # -- nessun problema di frame da quella parte.
         #
-        # Resta un placeholder identita', ma per un motivo diverso e minore:
+        # Il placeholder resta per un motivo diverso e minore:
         # rotation_matrix_to_quaternion() cerca il percorso piu' breve
         # rispetto a un orientamento "corrente" per evitare un salto tra due
         # rappresentazioni equivalenti del quaternione (doppio ricoprimento) --
