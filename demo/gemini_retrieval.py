@@ -185,6 +185,82 @@ Esempio di output valido: ["glass"]  oppure  ["bottle", "phone"]  oppure  []
     return valid
 
 
+# ── 3. Giudice di plausibilità funzionale (avanzamento post-grasp) ──
+def judge_functional_relation(label_a, predicate, label_b, model=MODEL):
+    """
+    Chiamata da advance_to_next_object() dopo che un grasp è confermato:
+    valuta se la relazione rilevata tra l'oggetto appena graspato (label_a)
+    e un candidato successivo (label_b) riflette un legame funzionale reale
+    (non solo prossimità/impilamento casuale), ancorando il giudizio alla
+    relazione VG150 effettivamente osservata (predicate) invece di chiedere
+    "sono mai correlati in astratto" -- domanda troppo vaga, un LLM tende a
+    rispondere sempre di sì.
+
+    Ritorna un dict {"plausible": bool, "score": float, "reason": str}, o
+    None se Gemini non è raggiungibile o la risposta non è parsabile (stesso
+    fallback sicuro di resolve_targets) -- il chiamante decide cosa fare in
+    quel caso.
+    """
+    client = get_client()
+
+    prompt = f"""Sei l'assistente semantico di un robot che, dopo aver afferrato un oggetto,
+decide se muoversi autonomamente verso un secondo oggetto perché
+funzionalmente collegato al primo (es. presa una bottiglia, andare verso
+il bicchiere per versare).
+
+Il sistema di percezione ha rilevato questa relazione tra due oggetti nella scena:
+"{label_a}" -- {predicate} --> "{label_b}"
+
+Appena afferrato "{label_a}", ha senso che il robot si muova autonomamente
+verso "{label_b}" come prossimo passo di un compito reale? Considera:
+- Una relazione puramente spaziale/casuale (es. due oggetti solo vicini o
+  impilati per caso) NON è funzionale.
+- Una relazione che riflette un uso reale insieme (versare, aprire, usare
+  uno strumento sull'altro, ecc.) È funzionale.
+
+Rispondi SOLO con un oggetto JSON, senza testo aggiuntivo, in questo formato:
+{{"plausible": true/false, "score": 0.0-1.0, "reason": "breve motivazione"}}
+"""
+
+    for attempt in range(3):
+        try:
+            response = client.models.generate_content(
+                model=model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.0,
+                    response_mime_type="application/json",
+                ),
+            )
+            break
+        except Exception as e:
+            if attempt < 2:
+                print(f"[gemini_retrieval] Tentativo {attempt+1} fallito: {e}. Riprovo tra 3s...")
+                time.sleep(3)
+            else:
+                print(f"[gemini_retrieval] Tutti i tentativi falliti: {e}")
+                return None
+
+    raw = (response.text or "").strip()
+    raw = raw.replace("```json", "").replace("```", "").strip()
+
+    try:
+        result = json.loads(raw)
+    except json.JSONDecodeError:
+        print(f"[gemini_retrieval] Risposta non parsabile: {raw!r}")
+        return None
+
+    if not isinstance(result, dict) or "plausible" not in result:
+        print(f"[gemini_retrieval] Risposta in formato inatteso: {result!r}")
+        return None
+
+    return {
+        "plausible": bool(result.get("plausible")),
+        "score": float(result.get("score", 0.0)),
+        "reason": str(result.get("reason", "")),
+    }
+
+
 # ── Test standalone (senza ROS2 / senza telecamera) ─────────
 if __name__ == "__main__":
     # Mini scene_graph finto per provare la pipeline a tavolino,
@@ -216,3 +292,16 @@ if __name__ == "__main__":
     ]:
         targets = resolve_targets(descrizione, scene_json)
         print(f'  "{descrizione}"  ->  {targets}')
+
+    print("\n--- Test giudice di plausibilità funzionale ---")
+    for label_a, predicate, label_b in [
+        ("bottle", "on", "glass"),        # coppia plausibile
+        ("book", "on", "orange"),         # coppia-trappola: spaziale, non funzionale
+        ("hand", "holding", "glass"),     # plausibile, caso reale del grafo finto
+    ]:
+        verdict = judge_functional_relation(label_a, predicate, label_b)
+        if verdict is None:
+            print(f'  "{label_a}" -{predicate}-> "{label_b}"  ->  (Gemini non raggiungibile)')
+        else:
+            esito = "PLAUSIBILE" if verdict["plausible"] else "NON PLAUSIBILE"
+            print(f'  "{label_a}" -{predicate}-> "{label_b}"  ->  {esito} (score={verdict["score"]:.2f}) — {verdict["reason"]}')

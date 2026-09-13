@@ -532,7 +532,24 @@ class SGGNode(Node):
             return
 
         pred, obj_idx = best_rel
-        self.active_target_label = scene_graph[obj_idx]['label']
+        candidate_label = scene_graph[obj_idx]['label']
+
+        from demo.gemini_retrieval import judge_functional_relation
+        verdict = judge_functional_relation(grasped_label, pred, candidate_label)
+        # TODO: modalità SOLO LOG per validare il giudice prima di fidarsene --
+        # non cambia ancora il comportamento (active_target_label si imposta
+        # comunque come oggi, indipendentemente dal verdetto). Prossimo passo,
+        # dopo verifica in lab: se verdict['plausible'] è False, scartare
+        # questo candidato e riprovare col prossimo per count invece di
+        # fermarsi; se Gemini non risponde (verdict is None), comportamento
+        # invariato (nessun veto, si va avanti come oggi).
+        if verdict is not None:
+            esito = "APPROVATO" if verdict['plausible'] else "BOCCIATO"
+            print(f"  🤖 Giudice LLM: {esito} (score={verdict['score']:.2f}) — {verdict['reason']}")
+        else:
+            print("  🤖 Giudice LLM non raggiungibile, nessun veto (solo log per ora).")
+
+        self.active_target_label = candidate_label
         print(f"  → Grasp di '{grasped_label}' rilevato. Prossimo target: '{self.active_target_label}' ({pred}, {best_count}x)")
 
 
