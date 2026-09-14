@@ -1,17 +1,12 @@
 #!/usr/bin/env python3
 """
-Nodo placeholder per l'integrazione GraspNet (Fase B).
+Nodo di integrazione GraspNet.
 
 Ascolta /graspnet/trigger (pubblicato da ET_node quando il braccio entra in
-zona di grasp) e risponde pubblicando un orientamento su
+zona di grasp): cattura l'ultimo frame RGB-D disponibile, lo manda al
+server di inferenza GraspNet sulla VM GPU (grasp_server.py, via HTTP),
+converte la posa di grasp restituita in un quaternione e lo pubblica su
 /graspnet/grasp_orientation.
-
-Per ora l'orientamento è un PLACEHOLDER fisso, non calcolato da GraspNet
-(bloccato dalla mancanza di GPU sul laptop). Questo nodo
-serve a validare l'intera tubatura (trigger -> risposta -> movimento del
-braccio) prima che l'inferenza vera sia disponibile. Quando GraspNet sarà
-collegabile, questo file diventerà lo scheletro su cui innestare la vera
-cattura RGB-D + inferenza, sostituendo solo la funzione trigger_callback.
 """
 
 import rclpy
@@ -19,8 +14,21 @@ from rclpy.node import Node
 from std_msgs.msg import Bool
 from geometry_msgs.msg import QuaternionStamped
 from sensor_msgs.msg import Image, CameraInfo
-from cv_bridge import CvBridge
 import numpy as np
+
+
+def imgmsg_to_numpy_bgr8(msg):
+    """Sostituisce cv_bridge.imgmsg_to_cv2(msg, 'bgr8') con una conversione
+    manuale — stesso motivo di sgg_ros_node.py: cv_bridge (compilato contro
+    NumPy 1.x dal sistema ROS2) va in segfault se importato insieme a
+    NumPy 2.x (qui richiesto da altre dipendenze del venv)."""
+    return np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, 3)
+
+
+def imgmsg_to_numpy_depth16(msg):
+    """Sostituisce cv_bridge.imgmsg_to_cv2(msg, 'passthrough') per la depth
+    16UC1 (RealSense allineata, valori in millimetri) — stesso motivo sopra."""
+    return np.frombuffer(msg.data, dtype=np.uint16).reshape(msg.height, msg.width)
 
 COLOR_TOPIC = '/camera/camera/color/image_raw'
 DEPTH_TOPIC = '/camera/camera/aligned_depth_to_color/image_raw'
@@ -74,8 +82,6 @@ class GraspNetNode(Node):
             Bool, trigger_topic, self.trigger_callback, 10
         )
 
-        self.bridge = CvBridge()
-
         # Ultimo frame disponibile per ciascuna sorgente — aggiornati in
         # continuo dalle rispettive callback, letti (non richiesti on-demand)
         # quando arriva il trigger. Nessun lock: le callback di questo nodo
@@ -123,11 +129,12 @@ class GraspNetNode(Node):
         self.get_logger().info('Trigger ricevuto: chiamo il server GraspNet sulla VM.')
 
         # --- 1. Conversione dei messaggi ROS in array numpy ---
-        # cv_bridge usato qui (non rimosso come in sgg_ros_node.py) — se in
-        # futuro emergesse lo stesso conflitto NumPy 1.x/2.x gia' visto
-        # altrove, sostituire con conversione manuale come fatto la'.
-        color_img = self.bridge.imgmsg_to_cv2(self.last_color_frame, desired_encoding='bgr8')
-        depth_img = self.bridge.imgmsg_to_cv2(self.last_depth_frame, desired_encoding='passthrough')
+        # Conversione manuale (non cv_bridge, vedi imgmsg_to_numpy_bgr8/
+        # imgmsg_to_numpy_depth16 in cima al file) -- cv_bridge qui andava in
+        # segfault al primo trigger reale (conflitto NumPy 1.x/2.x), stesso
+        # problema gia' risolto in sgg_ros_node.py.
+        color_img = imgmsg_to_numpy_bgr8(self.last_color_frame)
+        depth_img = imgmsg_to_numpy_depth16(self.last_depth_frame)
         depth_img = depth_img.astype('float32')
 
         # --- 2. Estrazione intrinseci dalla CameraInfo ---
