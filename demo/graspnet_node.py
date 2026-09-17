@@ -12,7 +12,7 @@ converte la posa di grasp restituita in un quaternione e lo pubblica su
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Bool
-from geometry_msgs.msg import QuaternionStamped
+from geometry_msgs.msg import QuaternionStamped, PoseArray, PointStamped
 from sensor_msgs.msg import Image, CameraInfo
 import numpy as np
 
@@ -41,8 +41,14 @@ GRASP_SERVER_URL = "http://10.75.4.28:5001/predict_grasp"
 # Soglie di profondita' (mm) per isolare la zona di lavoro. TODO: tarare
 # empiricamente in lab — questi sono valori di partenza plausibili per
 # la fase di grasp (braccio gia' vicino all'oggetto), non ancora validati.
-DEPTH_MIN_MM = 100
-DEPTH_MAX_MM = 400
+# Al trigger (zona di grasp a 0.30 m dal punto di hover) la camera e' a circa
+# 0.4 m dall'oggetto: con un massimo di 400 mm l'oggetto veniva tagliato.
+DEPTH_MIN_MM = 150
+DEPTH_MAX_MM = 700
+
+# Raggio entro cui un grasp e' considerato "sul target" (camera frame, metri).
+# Tiene conto della latenza tra l'immagine di SGG e quella usata per GraspNet.
+GRASP_TARGET_RADIUS_M = 0.10
 
 
 from scipy.spatial.transform import Rotation
@@ -73,13 +79,29 @@ class GraspNetNode(Node):
 
         self.declare_parameter('trigger_topic', '/graspnet/trigger')
         self.declare_parameter('orientation_topic', '/graspnet/grasp_orientation')
+        self.declare_parameter('candidate_targets_topic', '/sgg/candidate_targets')
+        self.declare_parameter('target_point_topic', '/sgg/target_point')
 
         trigger_topic = self.get_parameter('trigger_topic').get_parameter_value().string_value
         orientation_topic = self.get_parameter('orientation_topic').get_parameter_value().string_value
 
         self.pub = self.create_publisher(QuaternionStamped, orientation_topic, 10)
+        # Coda di 1: la chiamata al server blocca il thread, e i trigger
+        # accumulati nel frattempo produrrebbero risposte su frame vecchi.
         self.sub = self.create_subscription(
-            Bool, trigger_topic, self.trigger_callback, 10
+            Bool, trigger_topic, self.trigger_callback, 1
+        )
+
+        # Ultima posizione nota del target in camera frame, dal canale che ha
+        # pubblicato per ultimo (candidati impliciti o target esplicito t/g).
+        self.last_target_points = []
+        self.create_subscription(
+            PoseArray, self.get_parameter('candidate_targets_topic').get_parameter_value().string_value,
+            self.candidates_callback, 10
+        )
+        self.create_subscription(
+            PointStamped, self.get_parameter('target_point_topic').get_parameter_value().string_value,
+            self.target_point_callback, 10
         )
 
         # Ultimo frame disponibile per ciascuna sorgente — aggiornati in
@@ -105,6 +127,32 @@ class GraspNetNode(Node):
             f'GraspNet node attivo: {trigger_topic} -> {orientation_topic} | '
             f'RGB-D da {COLOR_TOPIC}, {DEPTH_TOPIC}, {CAMERA_INFO_TOPIC}'
         )
+
+    def candidates_callback(self, msg: PoseArray):
+        self.last_target_points = [np.array([p.position.x, p.position.y, p.position.z]) for p in msg.poses]
+
+    def target_point_callback(self, msg: PointStamped):
+        self.last_target_points = [np.array([msg.point.x, msg.point.y, msg.point.z])]
+
+    def select_grasp(self, result):
+        """Il grasp con score piu' alto entro GRASP_TARGET_RADIUS_M da un
+        target noto (i grasp arrivano gia' ordinati per score). Senza target
+        noti usa il migliore in assoluto. None se nessun grasp e' sul target."""
+        grasps = result.get('grasps') or [result]
+        if not self.last_target_points:
+            self.get_logger().warn('Nessun target noto: uso il grasp migliore in assoluto.')
+            return grasps[0]
+        for g in grasps:
+            t = np.array(g['translation'])
+            dist = min(np.linalg.norm(t - p) for p in self.last_target_points)
+            if dist < GRASP_TARGET_RADIUS_M:
+                self.get_logger().info(f"Grasp sul target: distanza {dist:.3f} m, score {g['score']:.3f}.")
+                return g
+        best_dist = min(min(np.linalg.norm(np.array(g['translation']) - p) for p in self.last_target_points) for g in grasps)
+        self.get_logger().warn(
+            f'Nessuno dei {len(grasps)} grasp entro {GRASP_TARGET_RADIUS_M} m dal target '
+            f'(il piu\' vicino a {best_dist:.3f} m): nessun orientamento pubblicato.')
+        return None
 
     def color_callback(self, msg: Image):
         self.last_color_frame = msg
@@ -171,8 +219,12 @@ class GraspNetNode(Node):
             self.get_logger().warn(f"GraspNet non ha prodotto un grasp valido: {result.get('reason')}")
             return
 
+        grasp = self.select_grasp(result)
+        if grasp is None:
+            return
+
         # --- 4. Conversione rotation_matrix -> quaternione ---
-        rotation_matrix = np.array(result['rotation_matrix'])
+        rotation_matrix = np.array(grasp['rotation_matrix'])
         # Orientamento corrente del gripper, come riferimento per la
         # correzione di segno (percorso piu' breve) dentro
         # rotation_matrix_to_quaternion(). Placeholder identita'.
@@ -205,7 +257,7 @@ class GraspNetNode(Node):
         orientation_msg.quaternion.w = float(quat[3])
 
         self.pub.publish(orientation_msg)
-        self.get_logger().info(f"Grasp pubblicato (score={result['score']:.3f}).")
+        self.get_logger().info(f"Grasp pubblicato (score={grasp['score']:.3f}).")
 
 
 def main(args=None):

@@ -33,6 +33,7 @@ NUM_POINT = 20000       # punti campionati dalla point cloud per l'inferenza
 NUM_VIEW = 300          # numero di viste candidate valutate da GraspNet
 COLLISION_THRESH = 0.01 # soglia di collisione per il filtro anti-collisione
 VOXEL_SIZE = 0.01       # dimensione voxel per il collision detector
+TOP_K = 20              # grasp restituiti al client, ordinati per score
 
 app = Flask(__name__)
 
@@ -230,15 +231,24 @@ def predict_grasp():
 
         best = gg[0]
 
-        # Risposta: rotation_matrix (3x3, come lista annidata per essere
-        # JSON-serializzabile) e translation (3,), entrambe in camera frame
-        # — stesso formato che rotation_matrix_to_quaternion() in
-        # graspnet_node.py si aspetta di ricevere da best_grasp.rotation_matrix.
+        # Risposta: il grasp migliore (campi storici) piu' i primi TOP_K grasp
+        # con posizione, tutti in camera frame -- il client sceglie quello
+        # vicino al target, perche' il migliore in assoluto puo' essere su un
+        # altro oggetto o sul tavolo.
+        top_k = [
+            {
+                "score": float(g.score),
+                "rotation_matrix": g.rotation_matrix.tolist(),
+                "translation": g.translation.tolist(),
+            }
+            for g in gg[:TOP_K]
+        ]
         return jsonify({
             "success": True,
             "score": float(best.score),
             "rotation_matrix": best.rotation_matrix.tolist(),
             "translation": best.translation.tolist(),
+            "grasps": top_k,
         }), 200
 
     except Exception as exc:
