@@ -83,19 +83,23 @@ def scene_graph_to_json(scene_graph, freq_threshold=FREQ_THRESHOLD):
             "position_pixel": list(node.get('position', (0, 0))),
         })
 
+    # Le relazioni puntano all'uid del nodo (vedi sgg_ros_node.py); i grafi
+    # senza uid (es. il grafo finto qui sotto) usano l'indice come uid.
+    nodes_by_uid = {n.get('uid', i): n for i, n in enumerate(scene_graph)}
     relations = []
     for node in scene_graph:
         if node['count'] < freq_threshold:
             continue
-        for (pred, obj_idx), count in node['relazioni'].items():
+        for (pred, obj_uid), count in list(node['relazioni'].items()):
             if count < freq_threshold:
                 continue
-            if obj_idx >= len(scene_graph):
+            obj = nodes_by_uid.get(obj_uid)
+            if obj is None:
                 continue
             relations.append({
                 "subject": node['label'],
                 "relation": pred,
-                "object": scene_graph[obj_idx]['label'],
+                "object": obj['label'],
             })
 
     return {"objects": objects, "relations": relations}

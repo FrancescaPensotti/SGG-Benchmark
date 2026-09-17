@@ -8,6 +8,7 @@ from PIL import Image
 import sys
 import os
 import threading
+import itertools
 from geometry_msgs.msg import PointStamped
 from geometry_msgs.msg import PoseArray, Pose
 from std_msgs.msg import Bool
@@ -106,6 +107,14 @@ print(f"Pronti! Uso: {device}")
 # rclpy nel loro insieme e command_loop).
 scene_graph = []
 current_z = None  # aggiornata quando viene rilevato un marker ArUco
+
+# Identificatore stabile di ogni nodo: le relazioni lo usano al posto
+# dell'indice nella lista, che cambia a ogni scene_graph.pop().
+_next_node_uid = itertools.count()
+
+
+def node_by_uid(sg, uid):
+    return next((n for n in sg if n.get('uid') == uid), None)
 
 # ── Funzioni ────────────────────────────────────────────────
 
@@ -210,7 +219,9 @@ def update_scene_graph(image, bboxes, rels):
         # L'ID di traccia (colonna 6) esiste solo se tracking=true è stato
         # passato a SGG_ONNX_Model — altrimenti box ha solo le colonne
         # originali (coordinate, score, label) e questo resta None.
-        track_id = int(box[6]) if len(box) > 6 else None
+        # Il tracker assegna id >= 1; 0 e' il valore di riempimento per i box
+        # senza traccia e non deve far combaciare oggetti diversi.
+        track_id = int(box[6]) if len(box) > 6 and int(box[6]) > 0 else None
 
         existing_idx = find_existing_node(label, embedding, (x1, y1, x2, y2),track_id)
 
@@ -227,6 +238,7 @@ def update_scene_graph(image, bboxes, rels):
             box_to_node[i] = existing_idx
         else:
             new_node = {
+                'uid': next(_next_node_uid),
                 'label': label,
                 'embedding': embedding,
                 'relazioni': {},
@@ -252,7 +264,7 @@ def update_scene_graph(image, bboxes, rels):
                 subj_node = box_to_node[subj_box]
                 obj_node = box_to_node[obj_box]
 
-                rel_key = (pred, obj_node)
+                rel_key = (pred, scene_graph[obj_node]['uid'])
                 if rel_key in scene_graph[subj_node]['relazioni']:
                     scene_graph[subj_node]['relazioni'][rel_key] += 1
                 else:
@@ -324,12 +336,15 @@ def print_scene_graph(sg=None):
         print(f"       pos pixel: {pos} | pos metri: ({pos_metri[0]:.3f}m, {pos_metri[1]:.3f}m) | {depth_info}")
         if bbox:
             print(f"       bbox: {bbox} — larghezza: {bbox[2]-bbox[0]}px, altezza: {bbox[3]-bbox[1]}px")
-        for (pred, obj_idx), count in node['relazioni'].items():
+        for (pred, obj_uid), count in list(node['relazioni'].items()):
             if count < FREQ_THRESHOLD:
                 continue
             if pred not in VG_TO_FUNCTIONAL and pred not in VG_TO_SPATIAL:
                 continue
-            print(f"       --({pred})--> {sg[obj_idx]['label']} [vista {count}x]")
+            obj = node_by_uid(sg, obj_uid)
+            if obj is None:
+                continue
+            print(f"       --({pred})--> {obj['label']} [vista {count}x]")
     print("="*50 + "\n")
 
 def get_candidate_targets():
@@ -460,6 +475,11 @@ class SGGNode(Node):
                         depth_m = read_depth_at_pixel(self.last_depth_frame, pos_pixel[0], pos_pixel[1])
                         if depth_m is not None:
                             current_z = depth_m
+                            print(f"  📏 Fallback depth attivo: z={depth_m:.3f}m (pixel {pos_pixel})")
+                        else:
+                            print(f"  ⚠️ Fallback depth: nessuna lettura valida nella finestra attorno a {pos_pixel} (troppo vicino/fuori range?) — z invariata")
+                    else:
+                        print("  ⚠️ Fallback depth: ArUco non visibile ma nessun pixel target disponibile (target ambiguo o non in scena) — z invariata")
 
                 self.republish_active_target()   # ripubblica il target attivo, se c'è
                 self.republish_candidate_targets()   # candidati multipli, solo se nessun comando esplicito attivo
@@ -488,20 +508,35 @@ class SGGNode(Node):
                 cv2.imshow("SGG ROS2 Node", self.img)
                 cv2.waitKey(1)
     
+    def z_for_pixel(self, pos_pixel):
+        """Profondita' dell'oggetto in quel pixel: depth reale della RealSense
+        se la lettura e' valida, altrimenti il piano ArUco (current_z).
+        Il piano ArUco da solo sbaglia la z degli oggetti alti (una bottiglia
+        ha la cima piu' vicina alla camera del marker sul tavolo).
+        Restituisce (z, sorgente) oppure (None, None)."""
+        if self.last_depth_frame is not None:
+            depth_m = read_depth_at_pixel(self.last_depth_frame, pos_pixel[0], pos_pixel[1])
+            if depth_m is not None:
+                return depth_m, 'depth'
+        if current_z is not None:
+            return current_z, 'aruco'
+        return None, None
+
     def pubblica_target(self, pos_pixel):
-        """Pubblica la posizione 3D del target nel frame camera, per il nodo MoveIt."""
-        if current_z is None:
-            self.get_logger().warn("current_z non disponibile (ArUco non visto): non pubblico il target.")
+        """Pubblica la posizione 3D del target nel frame camera."""
+        z, sorgente = self.z_for_pixel(pos_pixel)
+        if z is None:
+            self.get_logger().warn("Nessuna profondita' disponibile (ne' depth ne' ArUco): non pubblico il target.")
             return
-        pm = pixel_to_meters_3d(pos_pixel[0], pos_pixel[1], current_z, CAMERA_MATRIX)
+        pm = pixel_to_meters_3d(pos_pixel[0], pos_pixel[1], z, CAMERA_MATRIX)
         msg = PointStamped()
         msg.header.frame_id = "camera_color_optical_frame"
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.point.x = float(pm[0])
         msg.point.y = float(pm[1])
-        msg.point.z = float(current_z)
+        msg.point.z = float(z)
         self.target_pub.publish(msg)
-        print(f"  → Target pubblicato su /sgg/target_point: ({pm[0]:.3f}, {pm[1]:.3f}, {current_z:.3f}) [frame camera]")
+        print(f"  → Target pubblicato su /sgg/target_point: ({pm[0]:.3f}, {pm[1]:.3f}, {z:.3f}) [frame camera, z da {sorgente}]")
 
     def gripper_status_callback(self, msg: Bool):
         """Ogni messaggio su questo topic è già un grasp confermato (ET_node ha
@@ -522,20 +557,26 @@ class SGGNode(Node):
             return
 
         best_rel, best_count = None, 0
-        for (pred, obj_idx), count in grasped_node['relazioni'].items():
-            if pred in VG_TO_FUNCTIONAL and count > best_count:
-                best_rel, best_count = (pred, obj_idx), count
+        for (pred, obj_uid), count in grasped_node['relazioni'].items():
+            if pred in VG_TO_FUNCTIONAL and count > best_count and node_by_uid(scene_graph, obj_uid) is not None:
+                best_rel, best_count = (pred, obj_uid), count
 
         if best_rel is None:
             print(f"  ℹ️ Nessuna relazione funzionale per '{grasped_label}': nessun successivo.")
             self.active_target_label = None
             return
 
-        pred, obj_idx = best_rel
-        candidate_label = scene_graph[obj_idx]['label']
+        pred, obj_uid = best_rel
+        candidate_label = node_by_uid(scene_graph, obj_uid)['label']
 
-        from demo.gemini_retrieval import judge_functional_relation
-        verdict = judge_functional_relation(grasped_label, pred, candidate_label)
+        # Giudice in sola modalita' log: un suo errore (chiave mancante, rete)
+        # non deve fermare il nodo.
+        try:
+            from demo.gemini_retrieval import judge_functional_relation
+            verdict = judge_functional_relation(grasped_label, pred, candidate_label)
+        except Exception as exc:
+            print(f"  🤖 Giudice LLM non disponibile ({exc}).")
+            verdict = None
         # TODO: modalità SOLO LOG per validare il giudice prima di fidarsene --
         # non cambia ancora il comportamento (active_target_label si imposta
         # comunque come oggi, indipendentemente dal verdetto). Prossimo passo,
@@ -580,8 +621,6 @@ class SGGNode(Node):
         frame usando la stessa logica di pubblica_target, per ogni candidato."""
         if self.active_target_label is not None:
             return
-        if current_z is None:
-            return
 
         candidates = get_candidate_targets()
         if not candidates:
@@ -591,17 +630,25 @@ class SGGNode(Node):
         msg.header.frame_id = "camera_color_optical_frame"
         msg.header.stamp = self.get_clock().now().to_msg()
 
+        sorgenti = []
         for cand in candidates:
             pos_pixel = cand['position']
-            pm = pixel_to_meters_3d(pos_pixel[0], pos_pixel[1], current_z, CAMERA_MATRIX)
+            z, sorgente = self.z_for_pixel(pos_pixel)
+            if z is None:
+                continue
+            pm = pixel_to_meters_3d(pos_pixel[0], pos_pixel[1], z, CAMERA_MATRIX)
             pose = Pose()
             pose.position.x = float(pm[0])
             pose.position.y = float(pm[1])
-            pose.position.z = float(current_z)
+            pose.position.z = float(z)
             pose.orientation.w = 1.0
             msg.poses.append(pose)
+            sorgenti.append(f"{cand['label']}:z={z:.3f}({sorgente})")
 
+        if not msg.poses:
+            return
         self.candidates_pub.publish(msg)
+        print(f"  → Candidati pubblicati: {', '.join(sorgenti)}")
 
 
 
