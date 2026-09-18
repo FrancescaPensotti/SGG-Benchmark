@@ -83,7 +83,10 @@ VG_TO_SPATIAL = {
 
 # ── Carica i modelli ────────────────────────────────────────
 print("Carico SGG-Benchmark...")
-sgg = SGG_ONNX_Model(None, ONNX_PATH,tracking=False)
+# Tracker OC-SORT attivabile senza modificare il file: SGG_TRACKING=1 python demo/sgg_ros_node.py
+TRACKING = os.environ.get('SGG_TRACKING', '0') == '1'
+print(f"Tracking OC-SORT: {'attivo' if TRACKING else 'disattivo'}")
+sgg = SGG_ONNX_Model(None, ONNX_PATH, tracking=TRACKING)
 
 print("Carico CLIP...")
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -332,7 +335,8 @@ def print_scene_graph(sg=None):
         else:
             pos_metri = (pos[0] * SCALA_PIXEL_METRI, pos[1] * SCALA_PIXEL_METRI)
             depth_info = "z=N/A (scala fissa)"
-        print(f"  [{i}] {node['label']} (visto {node['count']} volte) — storia: {len(history)} punti")
+        tid = f" — track_id: {node['track_id']}" if node.get('track_id') is not None else ""
+        print(f"  [{i}] {node['label']} (visto {node['count']} volte) — storia: {len(history)} punti{tid}")
         print(f"       pos pixel: {pos} | pos metri: ({pos_metri[0]:.3f}m, {pos_metri[1]:.3f}m) | {depth_info}")
         if bbox:
             print(f"       bbox: {bbox} — larghezza: {bbox[2]-bbox[0]}px, altezza: {bbox[3]-bbox[1]}px")
