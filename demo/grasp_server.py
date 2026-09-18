@@ -238,6 +238,7 @@ def predict_grasp():
         top_k = [
             {
                 "score": float(g.score),
+                "width": float(g.width),  # apertura della pinza richiesta [m]
                 "rotation_matrix": g.rotation_matrix.tolist(),
                 "translation": g.translation.tolist(),
             }

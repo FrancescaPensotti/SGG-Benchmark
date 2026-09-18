@@ -81,6 +81,10 @@ class GraspNetNode(Node):
         self.declare_parameter('orientation_topic', '/graspnet/grasp_orientation')
         self.declare_parameter('candidate_targets_topic', '/sgg/candidate_targets')
         self.declare_parameter('target_point_topic', '/sgg/target_point')
+        # Apertura massima utilizzabile: la Hand-E apre al massimo 5 cm, con
+        # 5 mm di margine per l'errore di stima della larghezza.
+        self.declare_parameter('max_grasp_width', 0.045)
+        self.max_grasp_width = self.get_parameter('max_grasp_width').get_parameter_value().double_value
 
         trigger_topic = self.get_parameter('trigger_topic').get_parameter_value().string_value
         orientation_topic = self.get_parameter('orientation_topic').get_parameter_value().string_value
@@ -139,6 +143,18 @@ class GraspNetNode(Node):
         target noto (i grasp arrivano gia' ordinati per score). Senza target
         noti usa il migliore in assoluto. None se nessun grasp e' sul target."""
         grasps = result.get('grasps') or [result]
+        # Le prese piu' larghe dell'apertura della pinza sono scartate subito:
+        # su un oggetto largo (es. bottiglia sdraiata presa sul corpo) GraspNet
+        # puo' proporre prese che la Hand-E non riesce a chiudere.
+        n_prima = len(grasps)
+        grasps = [g for g in grasps if g.get('width', 0.0) <= self.max_grasp_width]
+        if len(grasps) < n_prima:
+            self.get_logger().info(
+                f'Scartate {n_prima - len(grasps)} prese su {n_prima} piu\' larghe di {self.max_grasp_width:.3f} m.')
+        if not grasps:
+            self.get_logger().warn(
+                f'Nessuna presa entro l\'apertura della pinza ({self.max_grasp_width:.3f} m): nessun orientamento pubblicato.')
+            return None
         if not self.last_target_points:
             self.get_logger().warn('Nessun target noto: uso il grasp migliore in assoluto.')
             return grasps[0]
@@ -146,7 +162,8 @@ class GraspNetNode(Node):
             t = np.array(g['translation'])
             dist = min(np.linalg.norm(t - p) for p in self.last_target_points)
             if dist < GRASP_TARGET_RADIUS_M:
-                self.get_logger().info(f"Grasp sul target: distanza {dist:.3f} m, score {g['score']:.3f}.")
+                self.get_logger().info(
+                    f"Grasp sul target: distanza {dist:.3f} m, larghezza {g.get('width', float('nan')):.3f} m, score {g['score']:.3f}.")
                 return g
         best_dist = min(min(np.linalg.norm(np.array(g['translation']) - p) for p in self.last_target_points) for g in grasps)
         self.get_logger().warn(
