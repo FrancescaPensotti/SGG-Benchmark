@@ -9,6 +9,7 @@ dell'end-effector di `latency` secondi prima (come i cicli lenti di SGG), con
 rumore gaussiano. Pubblica sugli stessi topic dei nodi reali:
   - mode=implicit: /sgg/candidate_targets (PoseArray, un candidato)
   - mode=explicit: /sgg/target_point (PointStamped, serve sgg_to_et_bridge.py)
+  - mode=single:   PoseStamped sul canale a target singolo, senza bridge
 Al trigger GraspNet risponde dopo `graspnet_delay` secondi con un grasp "dall'alto"
 ruotato di `grasp_yaw_deg`, e confronta l'orientamento che ET_node ne ricava
 (/debug/desired_ee_orientation) con quello atteso.
@@ -64,7 +65,11 @@ class SimPerception(Node):
     def __init__(self):
         super().__init__('sim_perception')
 
-        self.declare_parameter('mode', 'implicit')                 # implicit | explicit
+        # implicit: PoseArray sul canale multi-candidato
+        # explicit: PointStamped su /sgg/target_point (serve sgg_to_et_bridge.py)
+        # single:   PoseStamped direttamente sul canale a target singolo, senza bridge
+        #           e senza isteresi/combinazione multi-candidato
+        self.declare_parameter('mode', 'implicit')                 # implicit | explicit | single
         # Oggetto rispetto alla posizione di tool0 al primo messaggio di posa
         # (base_link); ignorato se object_xyz ha 3 valori.
         self.declare_parameter('object_offset_from_start', [0.10, 0.05, -0.40])
@@ -80,6 +85,7 @@ class SimPerception(Node):
         self.declare_parameter('offset_camera_tool0', [-0.0334477, -0.062187, 0.0873308])
         self.declare_parameter('camera_to_tool0_quat', [-0.00163112, 0.00508842, 0.00484543, 0.999974])
         self.declare_parameter('grasp_frame_to_tool0_quat', [0.0, 0.7071068, 0.0, 0.7071068])
+        self.declare_parameter('single_target_topic', '/aruco_detector/target_pose_camera_frame')
         self.declare_parameter('gripper_offset', 0.15)
         self.declare_parameter('hover_clearance', 0.05)
 
@@ -112,6 +118,8 @@ class SimPerception(Node):
         self.create_subscription(QuaternionStamped, '/debug/desired_ee_orientation', self.desired_orientation_callback, 10)
         self.candidates_pub = self.create_publisher(PoseArray, '/sgg/candidate_targets', 10)
         self.target_pub = self.create_publisher(PointStamped, '/sgg/target_point', 10)
+        self.single_pub = self.create_publisher(
+            PoseStamped, self.get_parameter('single_target_topic').get_parameter_value().string_value, 10)
         self.grasp_pub = self.create_publisher(QuaternionStamped, '/graspnet/grasp_orientation', 10)
 
         self.create_timer(float(gp('period')), self.publish_target)
@@ -168,7 +176,14 @@ class SimPerception(Node):
                 self.last_visible_p_cam = p_cam
 
         stamp = self.get_clock().now().to_msg()
-        if self.mode == 'explicit':
+        if self.mode == 'single':
+            msg = PoseStamped()
+            msg.header.stamp = stamp
+            msg.header.frame_id = 'camera_color_optical_frame'
+            msg.pose.position.x, msg.pose.position.y, msg.pose.position.z = map(float, p_cam)
+            msg.pose.orientation.w = 1.0
+            self.single_pub.publish(msg)
+        elif self.mode == 'explicit':
             msg = PointStamped()
             msg.header.stamp = stamp
             msg.header.frame_id = 'camera_color_optical_frame'
