@@ -39,6 +39,11 @@ SCALA_PIXEL_METRI = 0.000435  # fallback se ArUco non visibile, calcolato con z=
 
 DEPTH_TOPIC = '/camera/camera/aligned_depth_to_color/image_raw'
 DEPTH_WINDOW = 5  # finestra NxN attorno al pixel target per mediare il depth e ridurre il rumore
+# Sotto questa distanza la D435 non e' affidabile (range minimo misurato in lab
+# il 14/09: ~20.4 cm). Letture piu' vicine vengono scartate: il 18/09 una lettura
+# a 0.218 m ha spostato il target di oltre 10 cm in un ciclo, facendo scattare il
+# braccio all'indietro.
+MIN_VALID_DEPTH_M = 0.25
 
 # Margine dal bordo dell'immagine (in pixel) entro cui un oggetto è considerato
 # "vicino al bordo" — se l'ultima posizione nota di un nodo era in questa fascia,
@@ -477,6 +482,10 @@ class SGGNode(Node):
 
                     if pos_pixel is not None:
                         depth_m = read_depth_at_pixel(self.last_depth_frame, pos_pixel[0], pos_pixel[1])
+                        if depth_m is not None and depth_m < MIN_VALID_DEPTH_M:
+                            print(f"  ⚠️ Fallback depth: lettura {depth_m:.3f} m sotto il minimo affidabile "
+                                  f"({MIN_VALID_DEPTH_M} m) — z invariata")
+                            depth_m = None
                         if depth_m is not None:
                             current_z = depth_m
                             print(f"  📏 Fallback depth attivo: z={depth_m:.3f}m (pixel {pos_pixel})")
@@ -520,8 +529,11 @@ class SGGNode(Node):
         Restituisce (z, sorgente) oppure (None, None)."""
         if self.last_depth_frame is not None:
             depth_m = read_depth_at_pixel(self.last_depth_frame, pos_pixel[0], pos_pixel[1])
-            if depth_m is not None:
+            if depth_m is not None and depth_m >= MIN_VALID_DEPTH_M:
                 return depth_m, 'depth'
+            if depth_m is not None:
+                print(f"  ⚠️ Depth {depth_m:.3f} m sotto il minimo affidabile "
+                      f"({MIN_VALID_DEPTH_M} m) nel pixel {pos_pixel}: lettura scartata.")
         if current_z is not None:
             return current_z, 'aruco'
         return None, None
