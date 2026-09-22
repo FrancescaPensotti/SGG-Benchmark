@@ -21,7 +21,16 @@ def imgmsg_to_numpy_bgr8(msg):
     """Sostituisce cv_bridge.imgmsg_to_cv2(msg, 'bgr8') con una conversione
     manuale — stesso motivo di sgg_ros_node.py: cv_bridge (compilato contro
     NumPy 1.x dal sistema ROS2) va in segfault se importato insieme a
-    NumPy 2.x (qui richiesto da altre dipendenze del venv)."""
+    NumPy 2.x (qui richiesto da altre dipendenze del venv).
+
+    Il topic REALE (/camera/camera/color/image_raw) pubblica in encoding
+    'rgb8' (verificato dal vivo il 21/09/2026), non 'bgr8': questa funzione fa
+    un reshape puro senza scambiare i canali. Un tentativo di correggere lo
+    scambio (21-22/09) e' stato ripristinato: vedi imgmsg_to_numpy_bgr8() in
+    sgg_ros_node.py per il motivo (ha peggiorato l'identificazione nei test
+    reali, nonostante fosse corretto sulla carta). Qui l'immagine va solo al
+    server GraspNet per colorare la point cloud, non per la geometria della
+    presa -- tenuta coerente con sgg_ros_node.py comunque."""
     return np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, 3)
 
 
@@ -82,9 +91,31 @@ class GraspNetNode(Node):
         self.declare_parameter('candidate_targets_topic', '/sgg/candidate_targets')
         self.declare_parameter('target_point_topic', '/sgg/target_point')
         # Apertura massima utilizzabile: la Hand-E apre al massimo 5 cm, con
-        # 5 mm di margine per l'errore di stima della larghezza.
+        # 5 mm di margine per l'errore di stima della larghezza. Valore
+        # fisico reale -- riportato qui a fine sessione del 21/09/2026 dopo
+        # gli alzamenti temporanei a 0.10 per i test diagnostici di oggi.
         self.declare_parameter('max_grasp_width', 0.045)
         self.max_grasp_width = self.get_parameter('max_grasp_width').get_parameter_value().double_value
+
+        # Soglia minima di punteggio GraspNet: tra le prese sopra questa
+        # soglia si sceglie quella che farebbe ruotare meno il polso rispetto
+        # alla sua posa attuale (vedi select_grasp/_reorientation_angle_deg),
+        # non piu' semplicemente la migliore per punteggio. Aggiunto il
+        # 21/09/2026 su proposta del tutor: evita di scegliere una presa di
+        # qualita' scarsa solo perche' richiede poca rotazione.
+        self.declare_parameter('min_grasp_score', 0.5)
+        self.min_grasp_score = self.get_parameter('min_grasp_score').get_parameter_value().double_value
+
+        # Costanti fisse di calibrazione, stesse usate in ET_node.cpp
+        # (camera_to_tool0_quat, grasp_frame_to_tool0_quat) -- servono SOLO a
+        # stimare quanto dovrebbe ruotare il polso per ciascuna presa
+        # candidata (vedi _reorientation_angle_deg): non rifanno la
+        # trasformazione finale in base_link, che resta interamente in
+        # ET_node (unica fonte di verita' per quella catena).
+        self.declare_parameter('camera_to_tool0_quat', [0.0418853, 0.0106185, 0.0165691, 0.998929])
+        self.declare_parameter('grasp_frame_to_tool0_quat', [0.5, 0.5, 0.5, 0.5])
+        self._camera_to_tool0 = Rotation.from_quat(self.get_parameter('camera_to_tool0_quat').value)
+        self._grasp_frame_to_tool0 = Rotation.from_quat(self.get_parameter('grasp_frame_to_tool0_quat').value)
 
         trigger_topic = self.get_parameter('trigger_topic').get_parameter_value().string_value
         orientation_topic = self.get_parameter('orientation_topic').get_parameter_value().string_value
@@ -138,10 +169,26 @@ class GraspNetNode(Node):
     def target_point_callback(self, msg: PointStamped):
         self.last_target_points = [np.array([msg.point.x, msg.point.y, msg.point.z])]
 
+    def _reorientation_angle_deg(self, rotation_matrix):
+        """Angolo (gradi) di cui dovrebbe ruotare il polso per raggiungere
+        questa presa, rispetto alla sua posa ATTUALE -- non serve conoscere
+        l'orientamento live del robot per stimarlo: nella composizione usata
+        da ET_node (ee_orientation_ * camera_to_tool0_ * q_camera_frame *
+        grasp_frame_to_tool0_) l'orientamento attuale moltiplica tutto a
+        sinistra, quindi l'angolo tra l'orientamento desiderato e quello
+        attuale e' esattamente l'angolo di rotazione del resto della catena,
+        che e' quello che calcoliamo qui (stessi ordine e costanti di
+        ET_node.cpp, verificati numericamente il 21/09/2026)."""
+        q_cam = Rotation.from_matrix(np.array(rotation_matrix))
+        delta = self._camera_to_tool0 * q_cam * self._grasp_frame_to_tool0
+        return abs(delta.magnitude()) * 180.0 / np.pi
+
     def select_grasp(self, result):
-        """Il grasp con score piu' alto entro GRASP_TARGET_RADIUS_M da un
-        target noto (i grasp arrivano gia' ordinati per score). Senza target
-        noti usa il migliore in assoluto. None se nessun grasp e' sul target."""
+        """Tra le prese entro l'apertura della pinza (e, se noto, vicine al
+        target), sceglie quella con riorientamento stimato minore tra quelle
+        con punteggio sopra min_grasp_score; se nessuna raggiunge la soglia,
+        ripiega sulla migliore per punteggio tra tutte quelle valide. None se
+        non c'e' nessuna presa valida."""
         grasps = result.get('grasps') or [result]
         # Le prese piu' larghe dell'apertura della pinza sono scartate subito:
         # su un oggetto largo (es. bottiglia sdraiata presa sul corpo) GraspNet
@@ -155,21 +202,40 @@ class GraspNetNode(Node):
             self.get_logger().warn(
                 f'Nessuna presa entro l\'apertura della pinza ({self.max_grasp_width:.3f} m): nessun orientamento pubblicato.')
             return None
-        if not self.last_target_points:
-            self.get_logger().warn('Nessun target noto: uso il grasp migliore in assoluto.')
-            return grasps[0]
-        for g in grasps:
-            t = np.array(g['translation'])
-            dist = min(np.linalg.norm(t - p) for p in self.last_target_points)
-            if dist < GRASP_TARGET_RADIUS_M:
-                self.get_logger().info(
-                    f"Grasp sul target: distanza {dist:.3f} m, larghezza {g.get('width', float('nan')):.3f} m, score {g['score']:.3f}.")
-                return g
-        best_dist = min(min(np.linalg.norm(np.array(g['translation']) - p) for p in self.last_target_points) for g in grasps)
-        self.get_logger().warn(
-            f'Nessuno dei {len(grasps)} grasp entro {GRASP_TARGET_RADIUS_M} m dal target '
-            f'(il piu\' vicino a {best_dist:.3f} m): nessun orientamento pubblicato.')
-        return None
+
+        if self.last_target_points:
+            near_target = [
+                g for g in grasps
+                if min(np.linalg.norm(np.array(g['translation']) - p) for p in self.last_target_points) < GRASP_TARGET_RADIUS_M
+            ]
+            if not near_target:
+                best_dist = min(min(np.linalg.norm(np.array(g['translation']) - p) for p in self.last_target_points) for g in grasps)
+                self.get_logger().warn(
+                    f'Nessuno dei {len(grasps)} grasp entro {GRASP_TARGET_RADIUS_M} m dal target '
+                    f'(il piu\' vicino a {best_dist:.3f} m): nessun orientamento pubblicato.')
+                return None
+            grasps = near_target
+        else:
+            self.get_logger().warn('Nessun target noto: scelgo comunque tra tutte le prese valide.')
+
+        quality = [g for g in grasps if g['score'] >= self.min_grasp_score]
+        if not quality:
+            self.get_logger().warn(
+                f"Nessuna presa sopra la soglia di qualita' ({self.min_grasp_score:.2f}): "
+                f"scelgo la migliore per punteggio tra le {len(grasps)} valide.")
+            return grasps[0]  # gia' ordinate per score dal server
+
+        ranked = sorted(quality, key=lambda g: self._reorientation_angle_deg(g['rotation_matrix']))
+        for g in ranked[:3]:
+            self.get_logger().info(
+                f"  candidata: score={g['score']:.3f}, larghezza={g.get('width', float('nan')):.3f} m, "
+                f"rotazione stimata={self._reorientation_angle_deg(g['rotation_matrix']):.1f} deg")
+        best = ranked[0]
+        self.get_logger().info(
+            f"Presa scelta: score={best['score']:.3f}, larghezza={best.get('width', float('nan')):.3f} m, "
+            f"rotazione stimata={self._reorientation_angle_deg(best['rotation_matrix']):.1f} deg "
+            f"(sopra soglia qualita' {self.min_grasp_score:.2f}, tra {len(quality)} candidate).")
+        return best
 
     def color_callback(self, msg: Image):
         self.last_color_frame = msg
@@ -274,7 +340,15 @@ class GraspNetNode(Node):
         orientation_msg.quaternion.w = float(quat[3])
 
         self.pub.publish(orientation_msg)
-        self.get_logger().info(f"Grasp pubblicato (score={grasp['score']:.3f}).")
+        # Stampa diagnostica dell'orientamento proposto: quaternione grezzo
+        # (camera frame, stesso pubblicato su /graspnet/grasp_orientation) +
+        # roll/pitch/yaw in gradi, piu' leggibili a occhio in lab.
+        rpy_deg = Rotation.from_quat(quat).as_euler('xyz', degrees=True)
+        self.get_logger().info(
+            f"Grasp pubblicato (score={grasp['score']:.3f}): "
+            f"quat[xyzw]=({quat[0]:.3f}, {quat[1]:.3f}, {quat[2]:.3f}, {quat[3]:.3f}), "
+            f"rpy[deg]=({rpy_deg[0]:.1f}, {rpy_deg[1]:.1f}, {rpy_deg[2]:.1f}) in camera frame."
+        )
 
 
 def main(args=None):
