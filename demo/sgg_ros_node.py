@@ -9,6 +9,7 @@ import sys
 import os
 import threading
 import itertools
+import time
 from geometry_msgs.msg import PointStamped
 from geometry_msgs.msg import PoseArray, Pose
 from std_msgs.msg import Bool
@@ -130,7 +131,20 @@ def imgmsg_to_numpy_bgr8(msg):
     """Sostituisce cv_bridge.imgmsg_to_cv2(msg, 'bgr8') con una conversione
     manuale — evita la dipendenza da cv_bridge (compilato contro NumPy 1.x
     dal sistema ROS2), permettendo a boxmot (che richiede NumPy 2.x) di
-    coesistere senza conflitto."""
+    coesistere senza conflitto.
+
+    Il topic REALE (/camera/camera/color/image_raw) pubblica in encoding
+    'rgb8', verificato dal vivo il 21/09/2026 (`ros2 topic echo --field
+    encoding` -> rgb8), non 'bgr8': questa funzione fa un reshape puro senza
+    scambiare i canali, quindi il colore restituito e' in realta' RGB anche
+    se il nome fa pensare a BGR. Un tentativo di correggere lo scambio (21/09,
+    poi 22/09) era corretto sulla carta (confermato anche in tools/export_onnx.py,
+    che usa davvero cv2.imread + BGR->RGB) ma ha peggiorato l'identificazione
+    nei test reali in laboratorio -- riportato al comportamento originale il
+    22/09/2026 sulla base del riscontro pratico, prevale sul ragionamento
+    teorico. Ipotesi non confermata: VG150 e' sbilanciato verso poche classi
+    frequenti (es. \"man\"), e con i colori teoricamente corretti il modello
+    puo' diventare piu' incerto su alcuni oggetti e scivolare su quelle classi."""
     return np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, 3)
 
 
@@ -386,6 +400,16 @@ class SGGNode(Node):
         self.img = None
         self.lock = threading.Lock()
         self.active_target_label = None   # <--label del target da ripubblicare ad ogni frame
+
+        # Limita la FREQUENZA DI STAMPA (non di pubblicazione, quella resta
+        # a ogni frame) di "Target pubblicato"/"Candidati pubblicati": senza
+        # questo, a 15-30 Hz il terminale stampa piu' veloce di quanto si
+        # riesca a scrivere un comando in input() (girano su thread diversi,
+        # command_loop vs il callback camera) -- aggiunto il 21/09/2026 dopo
+        # che in lab era difficile scrivere "bottle" tra uno stampa e l'altra.
+        self._print_throttle_s = 1.0
+        self._last_target_print = 0.0
+        self._last_candidates_print = 0.0
         # TODO (audit): '/sgg/candidate_targets' e' un letterale qui, che deve
         # combaciare col default del parametro candidate_targets_topic dichiarato
         # in ET_node.cpp (repo Energy-Tanks) — stessa cosa per '/sgg/target_point'
@@ -552,7 +576,12 @@ class SGGNode(Node):
         msg.point.y = float(pm[1])
         msg.point.z = float(z)
         self.target_pub.publish(msg)
-        print(f"  → Target pubblicato su /sgg/target_point: ({pm[0]:.3f}, {pm[1]:.3f}, {z:.3f}) [frame camera, z da {sorgente}]")
+        now = time.time()
+        # Timestamp epoch (stesso formato dei log di ET_node, es. [1790001869.839])
+        # per poter allineare a occhio quando serve, aggiunto il 21/09/2026.
+        if now - self._last_target_print >= self._print_throttle_s:
+            self._last_target_print = now
+            print(f"  → [{now:.3f}] Target pubblicato su /sgg/target_point: ({pm[0]:.3f}, {pm[1]:.3f}, {z:.3f}) [frame camera, z da {sorgente}]")
 
     def gripper_status_callback(self, msg: Bool):
         """Ogni messaggio su questo topic è già un grasp confermato (ET_node ha
@@ -664,7 +693,10 @@ class SGGNode(Node):
         if not msg.poses:
             return
         self.candidates_pub.publish(msg)
-        print(f"  → Candidati pubblicati: {', '.join(sorgenti)}")
+        now = time.time()
+        if now - self._last_candidates_print >= self._print_throttle_s:
+            self._last_candidates_print = now
+            print(f"  → [{now:.3f}] Candidati pubblicati: {', '.join(sorgenti)}")
 
 
 
