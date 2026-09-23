@@ -11,7 +11,7 @@ converte la posa di grasp restituita in un quaternione e lo pubblica su
 
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, Float32MultiArray
 from geometry_msgs.msg import QuaternionStamped, PoseArray, PointStamped
 from sensor_msgs.msg import Image, CameraInfo
 import numpy as np
@@ -57,7 +57,15 @@ DEPTH_MAX_MM = 700
 
 # Raggio entro cui un grasp e' considerato "sul target" (camera frame, metri).
 # Tiene conto della latenza tra l'immagine di SGG e quella usata per GraspNet.
-GRASP_TARGET_RADIUS_M = 0.10
+GRASP_TARGET_RADIUS_M = 0.15
+
+# Margine (metri, camera frame) aggiunto intorno alla bbox del target prima
+# di mandarla a grasp_server.py per il crop X/Y della point cloud (22/09/2026).
+# Deve coprire almeno GRASP_TARGET_RADIUS_M (altrimenti scarteremmo nel crop
+# prese che poi il filtro di distanza accetterebbe comunque), piu' un
+# margine extra perche' il collision detector abbia contesto intorno al
+# bordo. Valore di partenza, da tarare in laboratorio come depth_min/max_mm.
+BBOX_MARGIN_M = GRASP_TARGET_RADIUS_M + 0.05
 
 
 from scipy.spatial.transform import Rotation
@@ -90,6 +98,9 @@ class GraspNetNode(Node):
         self.declare_parameter('orientation_topic', '/graspnet/grasp_orientation')
         self.declare_parameter('candidate_targets_topic', '/sgg/candidate_targets')
         self.declare_parameter('target_point_topic', '/sgg/target_point')
+        self.declare_parameter('target_bbox_topic', '/sgg/target_bbox')
+        self.declare_parameter('bbox_margin_m', BBOX_MARGIN_M)
+        self.bbox_margin_m = self.get_parameter('bbox_margin_m').get_parameter_value().double_value
         # Apertura massima utilizzabile: la Hand-E apre al massimo 5 cm, con
         # 5 mm di margine per l'errore di stima della larghezza. Valore
         # fisico reale -- riportato qui a fine sessione del 21/09/2026 dopo
@@ -99,7 +110,7 @@ class GraspNetNode(Node):
 
         # Soglia minima di punteggio GraspNet: tra le prese sopra questa
         # soglia si sceglie quella che farebbe ruotare meno il polso rispetto
-        # alla sua posa attuale (vedi select_grasp/_reorientation_angle_deg),
+        # alla sua posa attuale (vedi select_grasp/_best_equivalent_rotation),
         # non piu' semplicemente la migliore per punteggio. Aggiunto il
         # 21/09/2026 su proposta del tutor: evita di scegliere una presa di
         # qualita' scarsa solo perche' richiede poca rotazione.
@@ -109,7 +120,7 @@ class GraspNetNode(Node):
         # Costanti fisse di calibrazione, stesse usate in ET_node.cpp
         # (camera_to_tool0_quat, grasp_frame_to_tool0_quat) -- servono SOLO a
         # stimare quanto dovrebbe ruotare il polso per ciascuna presa
-        # candidata (vedi _reorientation_angle_deg): non rifanno la
+        # candidata (vedi _best_equivalent_rotation): non rifanno la
         # trasformazione finale in base_link, che resta interamente in
         # ET_node (unica fonte di verita' per quella catena).
         self.declare_parameter('camera_to_tool0_quat', [0.0418853, 0.0106185, 0.0165691, 0.998929])
@@ -137,6 +148,17 @@ class GraspNetNode(Node):
         self.create_subscription(
             PointStamped, self.get_parameter('target_point_topic').get_parameter_value().string_value,
             self.target_point_callback, 10
+        )
+
+        # Bbox pixel [x1, y1, x2, y2] dell'oggetto target, dallo stesso frame
+        # del target_point corrispondente (pubblicati insieme da
+        # sgg_ros_node.py, 22/09/2026). Usata per il crop X/Y lato
+        # grasp_server.py -- se non ancora arrivata, il trigger parte comunque
+        # senza bbox (solo filtro di profondita', comportamento pre-22/09).
+        self.last_target_bbox = None
+        self.create_subscription(
+            Float32MultiArray, self.get_parameter('target_bbox_topic').get_parameter_value().string_value,
+            self.target_bbox_callback, 10
         )
 
         # Ultimo frame disponibile per ciascuna sorgente — aggiornati in
@@ -169,7 +191,10 @@ class GraspNetNode(Node):
     def target_point_callback(self, msg: PointStamped):
         self.last_target_points = [np.array([msg.point.x, msg.point.y, msg.point.z])]
 
-    def _reorientation_angle_deg(self, rotation_matrix):
+    def target_bbox_callback(self, msg: Float32MultiArray):
+        self.last_target_bbox = list(msg.data)  # [x1, y1, x2, y2] in pixel
+
+    def _rotation_angle_deg(self, rotation_matrix):
         """Angolo (gradi) di cui dovrebbe ruotare il polso per raggiungere
         questa presa, rispetto alla sua posa ATTUALE -- non serve conoscere
         l'orientamento live del robot per stimarlo: nella composizione usata
@@ -183,6 +208,26 @@ class GraspNetNode(Node):
         delta = self._camera_to_tool0 * q_cam * self._grasp_frame_to_tool0
         return abs(delta.magnitude()) * 180.0 / np.pi
 
+    def _best_equivalent_rotation(self, rotation_matrix):
+        """Una presa a due dita simmetriche ha un gemello meccanicamente
+        identico, ruotato di 180 gradi attorno al proprio asse di
+        avvicinamento (le due dita sono intercambiabili sull'oggetto) --
+        GraspNet non elimina questa ridondanza da solo. Restituisce
+        (matrice, angolo_gradi) del gemello che richiede la rotazione
+        minore rispetto alla posa attuale del polso, cosi' non inseguiamo
+        la versione "capovolta" quando quella dritta e' equivalente e
+        piu' comoda. Asse X = approccio nel frame di grasp di GraspNet
+        (vedi grasp_frame_to_tool0_quat in ET_node), quindi il gemello e'
+        una rotazione di 180 gradi attorno a X LOCALE (post-moltiplicazione).
+        Aggiunto il 23/09/2026 su segnalazione in laboratorio."""
+        q_cam = Rotation.from_matrix(np.array(rotation_matrix))
+        q_flip = q_cam * Rotation.from_euler('x', 180, degrees=True)
+        angle_orig = self._rotation_angle_deg(q_cam.as_matrix())
+        angle_flip = self._rotation_angle_deg(q_flip.as_matrix())
+        if angle_flip < angle_orig:
+            return q_flip.as_matrix(), angle_flip
+        return np.array(rotation_matrix), angle_orig
+
     def select_grasp(self, result):
         """Tra le prese entro l'apertura della pinza (e, se noto, vicine al
         target), sceglie quella con riorientamento stimato minore tra quelle
@@ -190,6 +235,15 @@ class GraspNetNode(Node):
         ripiega sulla migliore per punteggio tra tutte quelle valide. None se
         non c'e' nessuna presa valida."""
         grasps = result.get('grasps') or [result]
+        # Larghezze grezze di TUTTE le candidate, prima di qualunque filtro
+        # (23/09/2026) -- per capire se le prese scartate per larghezza sono
+        # concentrate su valori enormi (probabile tavolo dentro il margine del
+        # crop) o solo un po' sopra il diametro reale (sovrastima di GraspNet
+        # sull'oggetto stesso).
+        larghezze_grezze = sorted(g.get('width', float('nan')) for g in grasps)
+        self.get_logger().info(
+            'Larghezze grezze (m), tutte le candidate: '
+            + ', '.join(f'{w:.3f}' for w in larghezze_grezze))
         # Le prese piu' larghe dell'apertura della pinza sono scartate subito:
         # su un oggetto largo (es. bottiglia sdraiata presa sul corpo) GraspNet
         # puo' proporre prese che la Hand-E non riesce a chiudere.
@@ -214,26 +268,48 @@ class GraspNetNode(Node):
                     f'Nessuno dei {len(grasps)} grasp entro {GRASP_TARGET_RADIUS_M} m dal target '
                     f'(il piu\' vicino a {best_dist:.3f} m): nessun orientamento pubblicato.')
                 return None
+            # Log per stadio (22/09/2026): quante sopravvivono a ciascun filtro,
+            # non solo il caso zero -- per capire DOVE si restringe la scelta
+            # quando il grasp finale non e' quello piu' comodo.
+            self.get_logger().info(
+                f'{len(near_target)} presa/e su {len(grasps)} entro {GRASP_TARGET_RADIUS_M} m dal target.')
             grasps = near_target
         else:
             self.get_logger().warn('Nessun target noto: scelgo comunque tra tutte le prese valide.')
 
         quality = [g for g in grasps if g['score'] >= self.min_grasp_score]
         if not quality:
+            # Anche nel ripiego (nessuna sopra soglia qualita') va applicato
+            # il controllo del gemello a 180 gradi (23/09/2026) -- altrimenti
+            # su questo ramo (frequente: capita ogni volta che nessuna presa
+            # raggiunge min_grasp_score) si torna a inseguire la versione
+            # capovolta anche quando quella dritta sarebbe equivalente.
+            fallback = grasps[0]  # gia' ordinate per score dal server
+            fb_matrix, fb_angle = self._best_equivalent_rotation(fallback['rotation_matrix'])
+            fallback = dict(fallback, rotation_matrix=fb_matrix)
             self.get_logger().warn(
                 f"Nessuna presa sopra la soglia di qualita' ({self.min_grasp_score:.2f}): "
-                f"scelgo la migliore per punteggio tra le {len(grasps)} valide.")
-            return grasps[0]  # gia' ordinate per score dal server
+                f"scelgo la migliore per punteggio tra le {len(grasps)} valide "
+                f"(score={fallback['score']:.3f}, rotazione stimata={fb_angle:.1f} deg).")
+            return fallback
+        self.get_logger().info(
+            f"{len(quality)} presa/e su {len(grasps)} sopra la soglia di qualita' ({self.min_grasp_score:.2f}).")
 
-        ranked = sorted(quality, key=lambda g: self._reorientation_angle_deg(g['rotation_matrix']))
+        # Per ciascuna candidata, la rotazione stimata e' quella del gemello
+        # (dritto o capovolto di 180 gradi attorno all'approccio) piu' comodo
+        # -- vedi _best_equivalent_rotation().
+        equivalents = {id(g): self._best_equivalent_rotation(g['rotation_matrix']) for g in quality}
+        ranked = sorted(quality, key=lambda g: equivalents[id(g)][1])
         for g in ranked[:3]:
             self.get_logger().info(
                 f"  candidata: score={g['score']:.3f}, larghezza={g.get('width', float('nan')):.3f} m, "
-                f"rotazione stimata={self._reorientation_angle_deg(g['rotation_matrix']):.1f} deg")
+                f"rotazione stimata={equivalents[id(g)][1]:.1f} deg")
         best = ranked[0]
+        best_matrix, best_angle = equivalents[id(best)]
+        best = dict(best, rotation_matrix=best_matrix)
         self.get_logger().info(
             f"Presa scelta: score={best['score']:.3f}, larghezza={best.get('width', float('nan')):.3f} m, "
-            f"rotazione stimata={self._reorientation_angle_deg(best['rotation_matrix']):.1f} deg "
+            f"rotazione stimata={best_angle:.1f} deg "
             f"(sopra soglia qualita' {self.min_grasp_score:.2f}, tra {len(quality)} candidate).")
         return best
 
@@ -257,7 +333,8 @@ class GraspNetNode(Node):
                 )
             return
 
-        self.get_logger().info('Trigger ricevuto: chiamo il server GraspNet sulla VM.')
+        bbox_status = 'bbox nota' if self.last_target_bbox is not None else 'nessuna bbox nota'
+        self.get_logger().info(f'Trigger ricevuto ({bbox_status}): chiamo il server GraspNet sulla VM.')
 
         # --- 1. Conversione dei messaggi ROS in array numpy ---
         # Conversione manuale (non cv_bridge, vedi imgmsg_to_numpy_bgr8/
@@ -274,6 +351,28 @@ class GraspNetNode(Node):
         k = self.last_camera_info.k
         fx, fy, cx, cy = k[0], k[4], k[2], k[5]
 
+        # --- 2b. Bbox del target con margine (22/09/2026) ---
+        # Converte il margine in metri (bbox_margin_m, camera frame) in
+        # pixel usando gli stessi intrinseci e la Z nota del target (stesso
+        # frame camera del bbox, pubblicati insieme da sgg_ros_node.py) --
+        # niente a che fare col frame base_link del robot, qui si resta
+        # sempre nel frame della camera. Se bbox o target non ancora
+        # disponibili, si procede senza (comportamento pre-22/09: solo
+        # filtro di profondita' lato server).
+        bbox_with_margin = None
+        if self.last_target_bbox is not None and self.last_target_points:
+            z = float(self.last_target_points[0][2])
+            if z > 0:
+                margin_px_x = self.bbox_margin_m * fx / z
+                margin_px_y = self.bbox_margin_m * fy / z
+                x1, y1, x2, y2 = self.last_target_bbox
+                bbox_with_margin = [
+                    max(0.0, x1 - margin_px_x),
+                    max(0.0, y1 - margin_px_y),
+                    min(float(depth_img.shape[1]), x2 + margin_px_x),
+                    min(float(depth_img.shape[0]), y2 + margin_px_y),
+                ]
+
         # --- 3. Chiamata HTTP al server GraspNet sulla VM ---
         def encode(array):
             return base64.b64encode(array.tobytes()).decode('utf-8')
@@ -288,6 +387,8 @@ class GraspNetNode(Node):
                                     # usati da imgmsg_to_numpy_depth16() in sgg_ros_node.py.
             'depth_min_mm': DEPTH_MIN_MM, 'depth_max_mm': DEPTH_MAX_MM,
         }
+        if bbox_with_margin is not None:
+            payload['bbox'] = bbox_with_margin
 
         try:
             resp = requests.post(GRASP_SERVER_URL, json=payload, timeout=10.0)

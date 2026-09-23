@@ -12,7 +12,7 @@ import itertools
 import time
 from geometry_msgs.msg import PointStamped
 from geometry_msgs.msg import PoseArray, Pose
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, Float32MultiArray
 
 # ROS2
 import rclpy
@@ -24,18 +24,26 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from demo.onnx_model import SGG_ONNX_Model
 from demo.query_scene import get_position_history, get_current_position, get_path_to_targets_meters
 from demo.aruco_detector import detect_aruco, pixel_to_meters_3d, CAMERA_MATRIX, calcola_scala_da_aruco
+from demo.graspnet_node import BBOX_MARGIN_M
 
 # ── Configurazione ──────────────────────────────────────────
 ONNX_PATH = "checkpoints/VG150/react++_yolov8m/model.onnx"
 SIMILARITY_THRESHOLD = 0.85
 FREQ_THRESHOLD = 2
-# Fattore di decay: ad ogni ciclo in cui il nodo non viene rivisto, la sua confidenza
-# viene moltiplicata per questo valore (vicino a 1).
-# Con 0.98: dopo 100 cicli non visti confidence ≈ 0.13, dopo 150 cicli ≈ 0.05.
-CONFIDENCE_DECAY = 0.98
-
 # Soglia sotto la quale il nodo viene rimosso dal grafo (oggetto considerato "perso" davvero).
 CONFIDENCE_REMOVE_THRESHOLD = 0.05
+
+# Decadimento basato sul TEMPO REALE trascorso (23/09/2026), non piu' su un
+# fattore fisso per ciclo elaborato -- con SGG a velocita' variabile (oggi tra
+# ~1.5s e ~5s a ciclo) un decay per-frame fa durare la "memoria" in secondi
+# reali in modo incoerente (misurato: 4-12+ minuti prima della rimozione,
+# troppo). Stesso principio gia' usato per il filtro EMA in ET_node.cpp
+# (master_direction, coefficiente da un dt reale, non fisso).
+# MEMORY_SECONDS_TARGET: quanti secondi reali senza essere rivisto prima che
+# un nodo scenda sotto CONFIDENCE_REMOVE_THRESHOLD, partendo da confidence=1.0.
+# Valore di partenza non misurato/concordato, da tarare in laboratorio.
+MEMORY_SECONDS_TARGET = 30.0
+CONFIDENCE_DECAY_PER_SECOND = CONFIDENCE_REMOVE_THRESHOLD ** (1.0 / MEMORY_SECONDS_TARGET)
 SCALA_PIXEL_METRI = 0.000435  # fallback se ArUco non visibile, calcolato con z=0.397m
 
 DEPTH_TOPIC = '/camera/camera/aligned_depth_to_color/image_raw'
@@ -56,7 +64,13 @@ BLACKLIST_OBJECTS = {
     'floor', 'wall', 'ceiling', 'chair',
     'ground', 'background', 'window', 'door',
     'hair', 'nose', 'table','face', 'head', 'eye', 'ear',
-    'mouth', 'neck', 'arm', 'leg'
+    'mouth', 'neck', 'arm', 'leg',
+    # Aggiunti il 23/09/2026: il banco da laboratorio viene classificato dal
+    # rilevatore come "counter" o "sink" (classi VG150), non come "table" --
+    # senza queste due, lo sfondo entrava tra i candidati dello Stadio B
+    # (selezione automatica a un solo oggetto), che non scattava mai perche'
+    # non c'era mai un solo candidato.
+    'counter', 'sink'
 }
 
 # ── Mappe relazioni VG150 → MomaGraph ───────────────────────
@@ -116,6 +130,7 @@ print(f"Pronti! Uso: {device}")
 # rclpy nel loro insieme e command_loop).
 scene_graph = []
 current_z = None  # aggiornata quando viene rilevato un marker ArUco
+_last_decay_time = None  # tempo reale (time.time()) dell'ultimo decadimento applicato, per il dt in update_scene_graph
 
 # Identificatore stabile di ogni nodo: le relazioni lo usano al posto
 # dell'indice nella lista, che cambia a ogni scene_graph.pop().
@@ -303,6 +318,14 @@ def update_scene_graph(image, bboxes, rels):
     # Per (b): servirebbe sapere se il gripper sta transitando sopra la posizione
     # nota del nodo (serve la posa del gripper, non solo la camera).
 
+    global _last_decay_time
+    now = time.time()
+    dt = (now - _last_decay_time) if _last_decay_time is not None else 0.0
+    _last_decay_time = now
+    # dt<=0 (primo giro, o orologio non avanzato) -> nessun decadimento questo
+    # ciclo, stesso principio guardia usato per il filtro EMA in ET_node.cpp.
+    decay_factor = (CONFIDENCE_DECAY_PER_SECOND ** dt) if dt > 0.0 else 1.0
+
     seen_nodes = set(box_to_node.values())
     to_remove = []
     for i, node in enumerate(scene_graph):
@@ -323,7 +346,7 @@ def update_scene_graph(image, bboxes, rels):
                     py < EDGE_MARGIN_PX or py > (frame_height - EDGE_MARGIN_PX)
 )
             if not near_edge:
-                node['confidence'] *= CONFIDENCE_DECAY
+                node['confidence'] *= decay_factor
 
             if node['confidence'] < CONFIDENCE_REMOVE_THRESHOLD:
                 print(f"  ⚠️ '{node['label']}' sparito dalla scena — probabilmente preso dal robot.")
@@ -401,6 +424,22 @@ class SGGNode(Node):
         self.lock = threading.Lock()
         self.active_target_label = None   # <--label del target da ripubblicare ad ogni frame
 
+        # Stadio B v2 (23/09/2026 sera): selezione automatica del target
+        # senza comando esplicito -- SOLO lato percezione, mai tocca
+        # ET_node.cpp ne' il canale multi-candidato (/sgg/candidate_targets).
+        # Se attivo e non c'e' un comando esplicito, quando in scena resta
+        # esattamente un candidato ci si comporta come se fosse arrivato un
+        # `t` su di lui: si riusa per intero il canale a target singolo
+        # (/sgg/target_point) gia' validato -- stesso congelamento, stessa
+        # media letture, stessa soglia di distanza lato ET_node (usare
+        # trigger_distance piu' basso, es. 0.10, come parametro di lancio
+        # di ET_node per questo caso, non qui). Off di default. Sostituisce
+        # il primo tentativo (parametro in ET_node.cpp, rimosso il 23/09
+        # dopo un incidente: il canale multi-candidato porta con se' un
+        # inseguimento continuo fuori zona di grasp, non voluto).
+        self.declare_parameter('auto_select_single_target', False)
+        self.auto_select_single_target = self.get_parameter('auto_select_single_target').get_parameter_value().bool_value
+
         # Limita la FREQUENZA DI STAMPA (non di pubblicazione, quella resta
         # a ogni frame) di "Target pubblicato"/"Candidati pubblicati": senza
         # questo, a 15-30 Hz il terminale stampa piu' veloce di quanto si
@@ -440,6 +479,12 @@ class SGGNode(Node):
 
         # Publisher della posizione del target verso il nodo MoveIt
         self.target_pub = self.create_publisher(PointStamped, '/sgg/target_point', 10)
+
+        # Bbox pixel [x1, y1, x2, y2] del target, verso graspnet_node.py
+        # (22/09/2026): stesso identico refuso-a-runtime possibile di
+        # candidates_pub/target_pub, il nome del topic deve combaciare con
+        # target_bbox_topic dichiarato in graspnet_node.py.
+        self.target_bbox_pub = self.create_publisher(Float32MultiArray, '/sgg/target_bbox', 10)
 
         # Timer per visualizzazione (ogni 100ms)
         self.create_timer(0.1, self.display_callback)
@@ -518,6 +563,16 @@ class SGGNode(Node):
                     else:
                         print("  ⚠️ Fallback depth: ArUco non visibile ma nessun pixel target disponibile (target ambiguo o non in scena) — z invariata")
 
+                # Stadio B v2: selezione automatica, solo se nessun comando
+                # esplicito e resta esattamente un candidato -- si comporta
+                # come se fosse arrivato un `t`, poi tutto il resto (riga
+                # sotto) segue il normale canale a target singolo.
+                if self.active_target_label is None and self.auto_select_single_target:
+                    auto_candidates = get_candidate_targets()
+                    if len(auto_candidates) == 1:
+                        self.active_target_label = auto_candidates[0]['label']
+                        print(f"  🤖 Selezione automatica (Stadio B): target impostato su '{self.active_target_label}'.")
+
                 self.republish_active_target()   # ripubblica il target attivo, se c'è
                 self.republish_candidate_targets()   # candidati multipli, solo se nessun comando esplicito attivo
 
@@ -542,7 +597,32 @@ class SGGNode(Node):
                             cv2.putText(display_img, f"{node['label']} (memoria)", (x1, max(y1 - 10, 0)),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 2)
 
-                cv2.imshow("SGG ROS2 Node", self.img)
+                # Debug (22/09/2026): disegna il bbox del target attivo e il
+                # crop con margine che riceverebbe grasp_server.py, per
+                # verificare a occhio l'allineamento — vedi BBOX_MARGIN_M in
+                # graspnet_node.py.
+                if self.active_target_label is not None:
+                    target_node = next((n for n in scene_graph if n['label'] == self.active_target_label), None)
+                    if target_node is not None:
+                        bbox = target_node.get('bbox')
+                        pos = target_node.get('position')
+                        if bbox is not None and pos is not None:
+                            x1, y1, x2, y2 = bbox
+                            cv2.rectangle(display_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                            z, _ = self.z_for_pixel(pos)
+                            if z:
+                                fx, fy = CAMERA_MATRIX[0, 0], CAMERA_MATRIX[1, 1]
+                                mx, my = int(BBOX_MARGIN_M * fx / z), int(BBOX_MARGIN_M * fy / z)
+                                cx1, cy1 = max(0, x1 - mx), max(0, y1 - my)
+                                cx2, cy2 = x2 + mx, y2 + my
+                                cv2.rectangle(display_img, (cx1, cy1), (cx2, cy2), (255, 255, 0), 2)
+                                cv2.putText(display_img, "crop GraspNet", (cx1, max(cy1 - 8, 0)),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
+
+                # Fix 22/09/2026: mostrava self.img (senza i riquadri appena
+                # disegnati sopra) invece di display_img -- i riquadri
+                # "memoria" e quelli di debug del target non comparivano mai.
+                cv2.imshow("SGG ROS2 Node", display_img)
                 cv2.waitKey(1)
     
     def z_for_pixel(self, pos_pixel):
@@ -562,8 +642,10 @@ class SGGNode(Node):
             return current_z, 'aruco'
         return None, None
 
-    def pubblica_target(self, pos_pixel):
-        """Pubblica la posizione 3D del target nel frame camera."""
+    def pubblica_target(self, pos_pixel, bbox=None):
+        """Pubblica la posizione 3D del target nel frame camera, e
+        opzionalmente il suo bbox pixel su /sgg/target_bbox (22/09/2026,
+        usato da graspnet_node.py per il crop X/Y lato server)."""
         z, sorgente = self.z_for_pixel(pos_pixel)
         if z is None:
             self.get_logger().warn("Nessuna profondita' disponibile (ne' depth ne' ArUco): non pubblico il target.")
@@ -576,6 +658,10 @@ class SGGNode(Node):
         msg.point.y = float(pm[1])
         msg.point.z = float(z)
         self.target_pub.publish(msg)
+        if bbox is not None:
+            bbox_msg = Float32MultiArray()
+            bbox_msg.data = [float(v) for v in bbox]
+            self.target_bbox_pub.publish(bbox_msg)
         now = time.time()
         # Timestamp epoch (stesso formato dei log di ET_node, es. [1790001869.839])
         # per poter allineare a occhio quando serve, aggiunto il 21/09/2026.
@@ -653,7 +739,7 @@ class SGGNode(Node):
                 if node.get('confidence', 0.0) >= CONFIDENCE_REMOVE_THRESHOLD:
                     pos = node.get('position')
                     if pos:
-                        self.pubblica_target(pos)
+                        self.pubblica_target(pos, bbox=node.get('bbox'))
                 return
         # Target non trovato: rimosso per decay, oppure mai stato visto — non pubblichiamo.
         

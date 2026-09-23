@@ -76,7 +76,7 @@ def decode_array(encoded_str, shape, dtype):
 
 
 def build_point_cloud(color, depth, fx, fy, cx, cy, depth_scale,
-                       depth_min_mm, depth_max_mm):
+                       depth_min_mm, depth_max_mm, bbox=None):
     """Equivalente a get_and_process_data() di demo.py, ma con color/depth
     ricevuti dalla richiesta invece che catturati da una RealSense locale
     (qui non c'e' nessuna camera collegata, la VM riceve solo i dati gia'
@@ -89,6 +89,17 @@ def build_point_cloud(color, depth, fx, fy, cx, cy, depth_scale,
     braccio e' gia' vicino all'oggetto (fase di grasp) — questi valori
     vanno quindi tarati empiricamente in lab sul nostro banco, non presi
     dal demo originale. Per questo sono parametri, non costanti fisse.
+
+    bbox: [x1, y1, x2, y2] in pixel, opzionale (22/09/2026). Aggiunge un
+    secondo filtro alla workspace mask, questa volta su X/Y invece che su
+    Z: limita la point cloud alla zona intorno al target rilevato da SGG
+    (bbox dell'oggetto + margine, calcolato lato client in graspnet_node.py
+    a partire da bbox_margin_m). Non tocca la soglia di profondita'
+    assoluta: il tavolo sotto l'oggetto resta nella point cloud (e quindi
+    visibile al collision detector) perche' e' comunque dentro
+    depth_min_mm/depth_max_mm — qui si toglie solo cio' che e' lontano
+    lateralmente (sfondo, altri oggetti), non cio' che sta sotto.
+    Se None, comportamento invariato (solo filtro di profondita').
     """
     # CameraInfo e' la struct attesa da create_point_cloud_from_depth_image
     # (definita in graspnet-baseline/utils/data_utils.py) — non e' la stessa
@@ -113,17 +124,39 @@ def build_point_cloud(color, depth, fx, fy, cx, cy, depth_scale,
     # sopra) e limita la point cloud alla zona rilevante.
     workspace_mask = (depth_filtered > depth_min_mm) & (depth_filtered < depth_max_mm)
 
+    if bbox is not None:
+        x1, y1, x2, y2 = bbox
+        x1 = max(0, int(round(x1)))
+        y1 = max(0, int(round(y1)))
+        x2 = min(depth.shape[1], int(round(x2)))
+        y2 = min(depth.shape[0], int(round(y2)))
+        xy_mask = np.zeros_like(workspace_mask)
+        xy_mask[y1:y2, x1:x2] = True
+        workspace_mask = workspace_mask & xy_mask
+
     cloud_masked = cloud[workspace_mask]
     color_masked = color[workspace_mask]
 
     # GraspNet richiede un numero fisso di punti in input (NUM_POINT).
     # Se ne abbiamo di piu', sotto-campioniamo; se ne abbiamo di meno,
     # ripetiamo alcuni punti a caso per raggiungere il numero richiesto.
+    #
+    # RNG con seed fisso (22/09/2026), non np.random globale: a parita' di
+    # scena (stesso color+depth+bbox in ingresso) il sottocampionamento era
+    # diverso a ogni chiamata, e per oggetti piccoli con pochi punti validi
+    # questo da solo poteva cambiare quali prese venivano proposte -- uno dei
+    # sospetti aperti sulla scarsa ripetibilita' vista in laboratorio. Con
+    # seed fisso, la stessa identica richiesta rimandata al server produce
+    # sempre lo stesso risultato: permette di distinguere "il sottocampionamento
+    # e' la causa" (rimandando lo stesso payload si ottiene sempre la stessa
+    # risposta) da "la scena reale cambia da una prova all'altra" (motivo
+    # diverso, non risolto da questo fix).
+    _rng = np.random.default_rng(42)
     if len(cloud_masked) >= NUM_POINT:
-        idxs = np.random.choice(len(cloud_masked), NUM_POINT, replace=False)
+        idxs = _rng.choice(len(cloud_masked), NUM_POINT, replace=False)
     else:
         idxs1 = np.arange(len(cloud_masked))
-        idxs2 = np.random.choice(len(cloud_masked), NUM_POINT - len(cloud_masked), replace=True)
+        idxs2 = _rng.choice(len(cloud_masked), NUM_POINT - len(cloud_masked), replace=True)
         idxs = np.concatenate([idxs1, idxs2], axis=0)
 
     cloud_sampled = cloud_masked[idxs]
@@ -193,7 +226,8 @@ def predict_grasp():
         "depth": "<base64>", "depth_shape": [H, W],    "depth_dtype": "float32",
         "fx": ..., "fy": ..., "cx": ..., "cy": ...,
         "depth_scale": ...,          # metri per unita' di depth (da RealSense)
-        "depth_min_mm": ..., "depth_max_mm": ...  # soglie workspace (fase di grasp)
+        "depth_min_mm": ..., "depth_max_mm": ...,  # soglie workspace (fase di grasp)
+        "bbox": [x1, y1, x2, y2]      # opzionale (22/09/2026): crop X/Y attorno al target
     }
     """
     data = request.get_json()
@@ -211,6 +245,7 @@ def predict_grasp():
             depth_scale=data["depth_scale"],
             depth_min_mm=data["depth_min_mm"],
             depth_max_mm=data["depth_max_mm"],
+            bbox=data.get("bbox"),
         )
 
         # Inferenza + filtro collisioni.
