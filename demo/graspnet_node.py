@@ -291,6 +291,7 @@ class GraspNetNode(Node):
                 f"Nessuna presa sopra la soglia di qualita' ({self.min_grasp_score:.2f}): "
                 f"scelgo la migliore per punteggio tra le {len(grasps)} valide "
                 f"(score={fallback['score']:.3f}, rotazione stimata={fb_angle:.1f} deg).")
+            self._log_offset_from_target(fallback)
             return fallback
         self.get_logger().info(
             f"{len(quality)} presa/e su {len(grasps)} sopra la soglia di qualita' ({self.min_grasp_score:.2f}).")
@@ -311,7 +312,24 @@ class GraspNetNode(Node):
             f"Presa scelta: score={best['score']:.3f}, larghezza={best.get('width', float('nan')):.3f} m, "
             f"rotazione stimata={best_angle:.1f} deg "
             f"(sopra soglia qualita' {self.min_grasp_score:.2f}, tra {len(quality)} candidate).")
+        self._log_offset_from_target(best)
         return best
+
+    def _log_offset_from_target(self, grasp):
+        """Solo log (24/09/2026): scarto fra il centro della presa scelta e il
+        punto target di SGG, entrambi in frame camera. Il robot va verso il
+        punto di SGG, non verso questo centro: se lo scarto e' soprattutto in
+        z (profondita') e cresce con oggetti piu' spessi, e' l'effetto
+        "punto sulla superficie invece che al centro" (vedi Metodologia 23/09)."""
+        if not self.last_target_points:
+            return
+        g = np.array(grasp['translation'], dtype=float)
+        target = min(self.last_target_points, key=lambda p: np.linalg.norm(g - p))
+        d = g - target
+        self.get_logger().info(
+            f"Centro presa - target SGG (frame camera): dx={d[0]:+.3f} dy={d[1]:+.3f} "
+            f"dz={d[2]:+.3f} m, distanza={np.linalg.norm(d):.3f} m "
+            f"(dz>0: presa piu' lontana dalla camera del punto SGG).")
 
     def color_callback(self, msg: Image):
         self.last_color_frame = msg

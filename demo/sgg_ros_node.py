@@ -43,6 +43,10 @@ CONFIDENCE_REMOVE_THRESHOLD = 0.05
 # un nodo scenda sotto CONFIDENCE_REMOVE_THRESHOLD, partendo da confidence=1.0.
 # Valore di partenza non misurato/concordato, da tarare in laboratorio.
 MEMORY_SECONDS_TARGET = 30.0
+
+# Stadio B: cicli consecutivi in cui lo stesso oggetto deve essere l'unico
+# visto prima della selezione automatica.
+AUTO_SELECT_STABLE_CYCLES = 3
 CONFIDENCE_DECAY_PER_SECOND = CONFIDENCE_REMOVE_THRESHOLD ** (1.0 / MEMORY_SECONDS_TARGET)
 SCALA_PIXEL_METRI = 0.000435  # fallback se ArUco non visibile, calcolato con z=0.397m
 
@@ -439,6 +443,23 @@ class SGGNode(Node):
         # inseguimento continuo fuori zona di grasp, non voluto).
         self.declare_parameter('auto_select_single_target', False)
         self.auto_select_single_target = self.get_parameter('auto_select_single_target').get_parameter_value().bool_value
+        self._auto_select_last_label = None
+        self._auto_select_streak = 0
+
+        # Arbitro del target, Stadio C (24/09/2026). 'off' (default) oppure
+        # 'ombra': calcola e scrive nel log cosa sceglierebbe fra gli oggetti
+        # visti, SENZA pubblicare nulla -- il robot si comporta come negli
+        # stadi A/B. Serve a vedere sui dati reali se le decisioni hanno senso
+        # prima di dargli il controllo. Vedi demo/target_arbiter.py.
+        self.declare_parameter('arbiter_mode', 'off')
+        self.arbiter_mode = self.get_parameter('arbiter_mode').get_parameter_value().string_value
+        self.arbiter = None
+        if self.arbiter_mode not in ('off', 'ombra'):
+            self.get_logger().warn(
+                f"arbiter_mode='{self.arbiter_mode}' non supportato (solo 'off' o 'ombra'): arbitro spento.")
+            self.arbiter_mode = 'off'
+        if self.arbiter_mode == 'ombra':
+            self._setup_arbiter()
 
         # Limita la FREQUENZA DI STAMPA (non di pubblicazione, quella resta
         # a ogni frame) di "Target pubblicato"/"Candidati pubblicati": senza
@@ -567,11 +588,38 @@ class SGGNode(Node):
                 # esplicito e resta esattamente un candidato -- si comporta
                 # come se fosse arrivato un `t`, poi tutto il resto (riga
                 # sotto) segue il normale canale a target singolo.
-                if self.active_target_label is None and self.auto_select_single_target:
-                    auto_candidates = get_candidate_targets()
-                    if len(auto_candidates) == 1:
-                        self.active_target_label = auto_candidates[0]['label']
-                        print(f"  🤖 Selezione automatica (Stadio B): target impostato su '{self.active_target_label}'.")
+                # dbg is None: grafo non aggiornato in questo ciclo, non far
+                # avanzare la conferma su dati vecchi.
+                if self.active_target_label is None and self.auto_select_single_target and dbg is not None:
+                    # Solo oggetti visti in QUESTO ciclo: i nodi in memoria
+                    # (frames_not_seen > 0) non devono contare come secondo
+                    # oggetto in scena -- il 23/09 un 'cap' in memoria ha
+                    # bloccato la selezione per ~75s dopo essere sparito.
+                    auto_candidates = [
+                        n for n in scene_graph
+                        if n['count'] >= FREQ_THRESHOLD
+                        and n.get('confidence', 0.0) >= CONFIDENCE_REMOVE_THRESHOLD
+                        and n.get('frames_not_seen', 0) == 0
+                    ]
+                    # Conferma su piu' cicli: con lo sfarfallio del rilevatore
+                    # un singolo ciclo "pulito" potrebbe mostrare solo una
+                    # parte dell'oggetto (es. 'cap' senza 'bottle').
+                    single = auto_candidates[0]['label'] if len(auto_candidates) == 1 else None
+                    if single is not None and single == self._auto_select_last_label:
+                        self._auto_select_streak += 1
+                    else:
+                        self._auto_select_streak = 1 if single is not None else 0
+                    self._auto_select_last_label = single
+                    if single is not None and self._auto_select_streak >= AUTO_SELECT_STABLE_CYCLES:
+                        self.active_target_label = single
+                        self._auto_select_streak = 0
+                        self._auto_select_last_label = None
+                        print(f"  🤖 Selezione automatica (Stadio B): target impostato su '{self.active_target_label}' "
+                              f"(unico oggetto visto per {AUTO_SELECT_STABLE_CYCLES} cicli consecutivi).")
+
+                # Arbitro in modalita' ombra: solo log, non tocca il target.
+                if self.arbiter is not None and dbg is not None:
+                    self._arbiter_shadow_step()
 
                 self.republish_active_target()   # ripubblica il target attivo, se c'è
                 self.republish_candidate_targets()   # candidati multipli, solo se nessun comando esplicito attivo
@@ -625,7 +673,95 @@ class SGGNode(Node):
                 cv2.imshow("SGG ROS2 Node", display_img)
                 cv2.waitKey(1)
     
-    def z_for_pixel(self, pos_pixel):
+    # ── Arbitro del target, modalita' ombra ────────────────────
+    def _setup_arbiter(self):
+        # Import qui: con arbitro spento il nodo non dipende da TF.
+        import tf2_ros
+        from rclpy.time import Time
+        from geometry_msgs.msg import PoseStamped
+        from tf2_geometry_msgs import do_transform_point
+        from demo.target_arbiter import TargetArbiter
+
+        self.arbiter = TargetArbiter()
+        self._tf_time_latest = Time()
+        self._do_transform_point = do_transform_point
+        self._tf_buffer = tf2_ros.Buffer()
+        self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
+        self._ee_pos = None
+        self._master_pos = None
+        self._pose_frames_logged = set()
+        self._last_arbiter_print = 0.0
+        # TODO (audit): letterali da tenere allineati ai default pose_topic e
+        # desired_pose_topic dichiarati in ET_node.cpp (repo Energy-Tanks).
+        self.create_subscription(PoseStamped, '/admittance_controller/pose_debug',
+                                 lambda m: self._store_pose(m, '_ee_pos'), 10)
+        self.create_subscription(PoseStamped, '/twist_to_pose_converter/desired_pose',
+                                 lambda m: self._store_pose(m, '_master_pos'), 10)
+        self.get_logger().info("Arbitro in modalita' OMBRA: calcola e scrive nel log, non pubblica nulla.")
+
+    def _store_pose(self, msg, attr):
+        setattr(self, attr, np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z]))
+        # Il disegno assume entrambe le pose in base_link: lo si verifica qui,
+        # una volta per topic.
+        if attr not in self._pose_frames_logged:
+            self._pose_frames_logged.add(attr)
+            print(f"  [arbitro ombra] {attr}: frame_id='{msg.header.frame_id}'")
+
+    def _arbiter_shadow_step(self):
+        """Un ciclo dell'arbitro sugli oggetti visti ora: solo log."""
+        try:
+            tf = self._tf_buffer.lookup_transform('base_link', 'camera_color_optical_frame',
+                                                  self._tf_time_latest)
+        except Exception as exc:
+            self._arbiter_print(f"TF camera->base_link non disponibile ({type(exc).__name__}): nessuna decisione.")
+            return
+
+        candidates = []
+        for n in scene_graph:
+            if (n['count'] < FREQ_THRESHOLD or n.get('confidence', 0.0) < CONFIDENCE_REMOVE_THRESHOLD
+                    or n.get('frames_not_seen', 0) != 0):
+                continue
+            pos, bbox = n.get('position'), n.get('bbox')
+            if pos is None or bbox is None:
+                continue
+            z, _ = self.z_for_pixel(pos, quiet=True)
+            if z is None:
+                continue
+            pm = pixel_to_meters_3d(pos[0], pos[1], z, CAMERA_MATRIX)
+            p = PointStamped()
+            p.header.frame_id = 'camera_color_optical_frame'
+            p.point.x, p.point.y, p.point.z = float(pm[0]), float(pm[1]), float(z)
+            pb = self._do_transform_point(p, tf).point
+            candidates.append({'uid': n['uid'], 'label': n['label'], 'bbox': bbox,
+                               'position_base': (pb.x, pb.y, pb.z)})
+
+        if self._ee_pos is None:
+            raw_dir, ee, posa = None, np.zeros(3), "posa robot assente"
+        elif self._master_pos is None:
+            raw_dir, ee, posa = None, self._ee_pos, "comando Falcon assente"
+        else:
+            raw_dir, ee, posa = self._master_pos - self._ee_pos, self._ee_pos, "ok"
+
+        res = self.arbiter.step(candidates, raw_dir, ee, time.time())
+
+        names = {c['uid']: f"{c['label']}#{c['uid']}" for c in candidates}
+        names_all = {n['uid']: f"{n['label']}#{n['uid']}" for n in scene_graph}
+        cand_txt = ", ".join(names[c['uid']] for c in candidates) or "nessuno"
+        score_txt = " ".join(f"{names[u]}={s:.2f}" for u, s in res.scores.items()) or "-"
+        prop_txt = names_all.get(res.proposal_uid, "nessuna") if res.proposal_uid is not None else "nessuna"
+        scelta_txt = names_all.get(res.target_uid, f"#{res.target_uid}") if res.target_uid is not None else "nessuna"
+        self._arbiter_print(
+            f"candidati: {cand_txt} | punteggi: {score_txt} | dir={res.direction_norm:.3f} m ({posa}) | "
+            f"proposta: {prop_txt} | scelta: {scelta_txt} ({res.reason}) | "
+            f"target esplicito: {self.active_target_label or 'nessuno'}")
+
+    def _arbiter_print(self, text):
+        now = time.time()
+        if now - self._last_arbiter_print >= self._print_throttle_s:
+            self._last_arbiter_print = now
+            print(f"  [arbitro ombra] [{now:.3f}] {text}")
+
+    def z_for_pixel(self, pos_pixel, quiet=False):
         """Profondita' dell'oggetto in quel pixel: depth reale della RealSense
         se la lettura e' valida, altrimenti il piano ArUco (current_z).
         Il piano ArUco da solo sbaglia la z degli oggetti alti (una bottiglia
@@ -635,7 +771,7 @@ class SGGNode(Node):
             depth_m = read_depth_at_pixel(self.last_depth_frame, pos_pixel[0], pos_pixel[1])
             if depth_m is not None and depth_m >= MIN_VALID_DEPTH_M:
                 return depth_m, 'depth'
-            if depth_m is not None:
+            if depth_m is not None and not quiet:
                 print(f"  ⚠️ Depth {depth_m:.3f} m sotto il minimo affidabile "
                       f"({MIN_VALID_DEPTH_M} m) nel pixel {pos_pixel}: lettura scartata.")
         if current_z is not None:
@@ -673,6 +809,8 @@ class SGGNode(Node):
         """Ogni messaggio su questo topic è già un grasp confermato (ET_node ha
         già verificato transizione + distanza) — nessuna logica di transizione
         necessaria qui."""
+        if self.arbiter is not None:
+            self.arbiter.reset()   # la scelta dell'arbitro vale fino al grasp
         if self.active_target_label is None:
             return
         self.advance_to_next_object(self.active_target_label)
@@ -893,6 +1031,12 @@ class SGGNode(Node):
                             print("Oggetti identificati ma posizione non disponibile.")
 
                 elif cmd == 'x':
+                    if self.arbiter is not None:
+                        # command_loop gira su un thread separato dal ciclo SGG
+                        # che fa avanzare l'arbitro: stesso lock del grafo.
+                        with self.lock:
+                            self.arbiter.reset()
+                        print("  [arbitro ombra] scelta azzerata.")
                     if self.active_target_label is None:
                         print("Nessun target attivo da deselezionare.")
                     else:
