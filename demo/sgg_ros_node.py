@@ -47,6 +47,17 @@ MEMORY_SECONDS_TARGET = 30.0
 # Stadio B: cicli consecutivi in cui lo stesso oggetto deve essere l'unico
 # visto prima della selezione automatica.
 AUTO_SELECT_STABLE_CYCLES = 3
+# Inventario della sessione (Stadio D, 24/09/2026): un oggetto entra
+# nell'elenco dei nomi visti quando e' stato rilevato in almeno tanti cicli.
+# Valore di partenza, piu' severo di FREQ_THRESHOLD per non inserire le
+# rilevazioni sporadiche.
+INVENTORY_MIN_COUNT = 5
+# Stadio D: silenzio minimo [s] sul target prima di attivare il suggerito.
+# ET_node esce dalla zona di grasp solo quando il target scade
+# (aruco_timeout_ = 12 s in ET_node.hpp) o ci si allontana di 40 cm, e ogni
+# messaggio sul target rinnova il timeout anche dentro la zona: pubblicare il
+# nuovo target prima terrebbe il braccio fermo sul punto del primo oggetto.
+NEXT_TARGET_MIN_SILENCE_S = 13.0
 CONFIDENCE_DECAY_PER_SECOND = CONFIDENCE_REMOVE_THRESHOLD ** (1.0 / MEMORY_SECONDS_TARGET)
 SCALA_PIXEL_METRI = 0.000435  # fallback se ArUco non visibile, calcolato con z=0.397m
 
@@ -427,6 +438,17 @@ class SGGNode(Node):
         self.img = None
         self.lock = threading.Lock()
         self.active_target_label = None   # <--label del target da ripubblicare ad ogni frame
+        # Stadio D (24/09/2026): oggetto suggerito dopo un grasp, tenuto fermo
+        # (non pubblicato) finche' la pinza non viene riaperta; poi diventa
+        # active_target_label come dopo un `t`.
+        self.suggested_label = None
+        self._suggestion_released = False   # pinza riaperta, in attesa del silenzio sul target
+        self._last_target_publish_time = 0.0
+        # Nomi degli oggetti visti in modo stabile dall'avvio, senza posizione
+        # e senza decadimento: la scelta semantica ha bisogno solo dei nomi, e
+        # la camera sul polso puo' perdere di vista gli altri oggetti per piu'
+        # dei ~30 s di memoria mentre si lavora sul primo.
+        self.session_inventory = {}   # label -> ultimo istante (time.time()) in cui e' stato visto
 
         # Stadio B v2 (23/09/2026 sera): selezione automatica del target
         # senza comando esplicito -- SOLO lato percezione, mai tocca
@@ -505,6 +527,10 @@ class SGGNode(Node):
         
         self.gripper_sub = self.create_subscription(
     Bool, '/gripper/grasp_confirmed', self.gripper_status_callback, 10)
+        # Stato della pinza a fine comando (ET_node o gripper_buttons_node):
+        # la riapertura attiva l'oggetto suggerito dallo Stadio D.
+        self.gripper_occupied_sub = self.create_subscription(
+            Bool, '/gripper/occupied', self.gripper_occupied_callback, 10)
 
         # Subscriber RealSense
         self.subscription = self.create_subscription(
@@ -612,7 +638,16 @@ class SGGNode(Node):
                 # sotto) segue il normale canale a target singolo.
                 # dbg is None: grafo non aggiornato in questo ciclo, non far
                 # avanzare la conferma su dati vecchi.
-                if self.active_target_label is None and self.auto_select_single_target and dbg is not None:
+                if dbg is not None:
+                    now_inv = time.time()
+                    for n in scene_graph:
+                        if n['count'] >= INVENTORY_MIN_COUNT and n.get('frames_not_seen', 0) == 0:
+                            self.session_inventory[n['label']] = now_inv
+
+                # Con un suggerimento dello Stadio D in attesa la selezione
+                # automatica resta ferma: sceglierebbe l'oggetto in mano.
+                if (self.active_target_label is None and self.suggested_label is None
+                        and self.auto_select_single_target and dbg is not None):
                     # Solo oggetti visti in QUESTO ciclo: i nodi in memoria
                     # (frames_not_seen > 0) non devono contare come secondo
                     # oggetto in scena -- il 23/09 un 'cap' in memoria ha
@@ -643,6 +678,7 @@ class SGGNode(Node):
                 if self.arbiter is not None and dbg is not None:
                     self._arbiter_shadow_step()
 
+                self.maybe_activate_suggestion()
                 self.republish_active_target()   # ripubblica il target attivo, se c'è
                 self.republish_candidate_targets()   # candidati multipli, solo se nessun comando esplicito attivo
 
@@ -688,6 +724,16 @@ class SGGNode(Node):
                                 cv2.rectangle(display_img, (cx1, cy1), (cx2, cy2), (255, 255, 0), 2)
                                 cv2.putText(display_img, "crop GraspNet", (cx1, max(cy1 - 8, 0)),
                                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
+
+                # Stadio D: il suggerimento in attesa resta scritto fisso
+                # sull'immagine, con il riquadro se l'oggetto e' in vista.
+                if self.suggested_label is not None:
+                    cv2.putText(display_img, f"Suggerito: {self.suggested_label} (riapri la pinza)", (10, 25),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
+                    sugg_node = next((n for n in scene_graph if n['label'] == self.suggested_label), None)
+                    if sugg_node is not None and sugg_node.get('bbox'):
+                        x1, y1, x2, y2 = sugg_node['bbox']
+                        cv2.rectangle(display_img, (x1, y1), (x2, y2), (255, 0, 255), 3)
 
                 # Fix 22/09/2026: mostrava self.img (senza i riquadri appena
                 # disegnati sopra) invece di display_img -- i riquadri
@@ -816,6 +862,7 @@ class SGGNode(Node):
         msg.point.y = float(pm[1])
         msg.point.z = float(z)
         self.target_pub.publish(msg)
+        self._last_target_publish_time = time.time()
         if bbox is not None:
             bbox_msg = Float32MultiArray()
             bbox_msg.data = [float(v) for v in bbox]
@@ -846,17 +893,58 @@ class SGGNode(Node):
             return
         if self.next_object_mode == 'semantica':
             self.advance_to_next_object_semantic(grasped_label)
+        else:
+            self.advance_to_next_object_spatial(grasped_label)
+        # Il suggerimento non si pubblica subito: con la pinza ancora chiusa
+        # sull'oggetto appena preso, avvicinarsi al successivo farebbe
+        # ripartire rotazione GraspNet e chiusura. Resta in attesa fino a
+        # gripper_occupied_callback (riapertura); intanto il target scade in
+        # ET_node (aruco_timeout, 12 s) e il braccio torna libero.
+        if self.active_target_label is not None:
+            self.suggested_label = self.active_target_label
+            self._suggestion_released = False
+            self.active_target_label = None
+            print(f"  💡 Suggerito '{self.suggested_label}': si attiva quando la pinza viene riaperta.")
+
+    def gripper_occupied_callback(self, msg: Bool):
+        if msg.data or self.suggested_label is None:
             return
-        self.advance_to_next_object_spatial(grasped_label)
+        self._suggestion_released = True
+        wait = NEXT_TARGET_MIN_SILENCE_S - (time.time() - self._last_target_publish_time)
+        if wait > 0.0:
+            print(f"  Pinza riaperta: '{self.suggested_label}' si attiva tra {wait:.0f} s "
+                  f"(il target precedente deve prima scadere in ET_node).")
+        self.maybe_activate_suggestion()
+
+    def maybe_activate_suggestion(self):
+        """Attiva il suggerito se la pinza e' stata riaperta e il target
+        precedente e' scaduto in ET_node. Chiamata alla riapertura e a ogni
+        ciclo di frame_callback."""
+        if self.suggested_label is None or not self._suggestion_released:
+            return
+        if time.time() - self._last_target_publish_time < NEXT_TARGET_MIN_SILENCE_S:
+            return
+        self.active_target_label = self.suggested_label
+        self.suggested_label = None
+        self._suggestion_released = False
+        if self.arbiter is not None:
+            self.arbiter.reset()
+        print(f"  → Target attivo '{self.active_target_label}' (suggerimento dello Stadio D).")
 
     def advance_to_next_object_semantic(self, grasped_label):
         """Prossimo target dai nomi degli oggetti in scena (tabella LLM su
         disco): vince il candidato con punteggio piu' alto sopra soglia."""
         with self.lock:
-            candidates = [n['label'] for n in scene_graph
-                          if n['count'] >= FREQ_THRESHOLD
-                          and n.get('confidence', 0.0) >= CONFIDENCE_REMOVE_THRESHOLD
-                          and n['label'] != grasped_label]
+            in_graph = [n['label'] for n in scene_graph
+                        if n['count'] >= FREQ_THRESHOLD
+                        and n.get('confidence', 0.0) >= CONFIDENCE_REMOVE_THRESHOLD]
+            inventory = list(self.session_inventory)
+        # Anche gli oggetti visti prima e ora dimenticati dalla memoria: la
+        # posizione servira' solo quando la camera li rivedra'.
+        candidates = [c for c in dict.fromkeys(in_graph + inventory) if c != grasped_label]
+        out_of_memory = [c for c in candidates if c not in in_graph]
+        if out_of_memory:
+            print(f"  Candidati solo dall'inventario (non piu' in memoria): {out_of_memory}")
         if not candidates:
             print(f"  ℹ️ Grasp di '{grasped_label}': nessun altro oggetto in scena, nessun successivo.")
             self.active_target_label = None
@@ -1048,6 +1136,7 @@ class SGGNode(Node):
                     # viene ripubblicato automaticamente ad ogni frame (vedi republish_active_target).
                     # Gli altri restano solo nel path stampato, in attesa della gestione multi-goal.
                     self.active_target_label = target_labels[0] if target_labels else None
+                    self.suggested_label = None   # un comando esplicito sostituisce il suggerimento
 
                     if current_z is not None:
                         path = []
@@ -1084,6 +1173,7 @@ class SGGNode(Node):
                         # viene ripubblicato automaticamente ad ogni frame (vedi republish_active_target).
                         # Gli altri restano solo nel path stampato, in attesa della gestione multi-goal.
                         self.active_target_label = target_labels[0]
+                        self.suggested_label = None
 
                         path = []
 
@@ -1112,6 +1202,9 @@ class SGGNode(Node):
                         with self.lock:
                             self.arbiter.reset()
                         print("  [arbitro ombra] scelta azzerata.")
+                    if self.suggested_label is not None:
+                        print(f"  → Annullato il suggerimento: '{self.suggested_label}'")
+                        self.suggested_label = None
                     if self.active_target_label is None:
                         print("Nessun target attivo da deselezionare.")
                     else:
