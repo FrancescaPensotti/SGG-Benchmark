@@ -461,6 +461,28 @@ class SGGNode(Node):
         if self.arbiter_mode == 'ombra':
             self._setup_arbiter()
 
+        # Stadio D, suggerimento del prossimo oggetto dopo un grasp (24/09/2026).
+        # 'off' (default): dopo il grasp nessun nuovo target. 'spaziale': regola
+        # precedente, dalle relazioni SGG tradotte con VG_TO_FUNCTIONAL.
+        # 'semantica': dai nomi degli oggetti in scena, con la tabella
+        # dell'LLM su disco (demo/functional_relations.py).
+        self.declare_parameter('next_object_mode', 'off')
+        self.declare_parameter('next_object_min_score', 0.5)
+        self.next_object_mode = self.get_parameter('next_object_mode').get_parameter_value().string_value
+        self.next_object_min_score = self.get_parameter('next_object_min_score').get_parameter_value().double_value
+        if self.next_object_mode not in ('off', 'spaziale', 'semantica'):
+            self.get_logger().warn(
+                f"next_object_mode='{self.next_object_mode}' non supportato (off/spaziale/semantica): spento.")
+            self.next_object_mode = 'off'
+        self.functional_table = None
+        if self.next_object_mode == 'semantica':
+            from demo.functional_relations import FunctionalRelationTable
+            from demo.gemini_retrieval import score_next_objects
+            self.functional_table = FunctionalRelationTable(scorer=score_next_objects)
+            print(f"Stadio D semantico: tabella {self.functional_table.path} "
+                  f"({len(self.functional_table.pairs)} oggetti afferrati gia' valutati), "
+                  f"punteggio minimo {self.next_object_min_score:.2f}")
+
         # Limita la FREQUENZA DI STAMPA (non di pubblicazione, quella resta
         # a ogni frame) di "Target pubblicato"/"Candidati pubblicati": senza
         # questo, a 15-30 Hz il terminale stampa piu' veloce di quanto si
@@ -816,6 +838,59 @@ class SGGNode(Node):
         self.advance_to_next_object(self.active_target_label)
 
     def advance_to_next_object(self, grasped_label):
+        """Dopo un grasp confermato sceglie il prossimo target secondo
+        next_object_mode (off / spaziale / semantica)."""
+        if self.next_object_mode == 'off':
+            print(f"  → Grasp di '{grasped_label}' rilevato. Stadio D spento: nessun prossimo target.")
+            self.active_target_label = None
+            return
+        if self.next_object_mode == 'semantica':
+            self.advance_to_next_object_semantic(grasped_label)
+            return
+        self.advance_to_next_object_spatial(grasped_label)
+
+    def advance_to_next_object_semantic(self, grasped_label):
+        """Prossimo target dai nomi degli oggetti in scena (tabella LLM su
+        disco): vince il candidato con punteggio piu' alto sopra soglia."""
+        with self.lock:
+            candidates = [n['label'] for n in scene_graph
+                          if n['count'] >= FREQ_THRESHOLD
+                          and n.get('confidence', 0.0) >= CONFIDENCE_REMOVE_THRESHOLD
+                          and n['label'] != grasped_label]
+        if not candidates:
+            print(f"  ℹ️ Grasp di '{grasped_label}': nessun altro oggetto in scena, nessun successivo.")
+            self.active_target_label = None
+            return
+
+        from demo.functional_relations import choose_next
+        missing = [c for c in candidates if self.functional_table.lookup(grasped_label, c) is None]
+        if missing and self.functional_table.scorer is not None:
+            # Chiamata di rete bloccante: per le prove conviene riempire la
+            # tabella prima (python3 demo/functional_relations.py <oggetti>).
+            print(f"  🤖 Coppie non in tabella per '{grasped_label}': {missing}, chiedo a Gemini...")
+        try:
+            scores = self.functional_table.scores(grasped_label, candidates)
+        except Exception as exc:
+            print(f"  🤖 Valutatore LLM non disponibile ({exc}): uso solo la tabella.")
+            scores = self.functional_table.scores(grasped_label, candidates, allow_query=False)
+
+        ordered = sorted(scores.items(), key=lambda kv: -kv[1]['score'])
+        print(f"  Punteggi dopo '{grasped_label}': "
+              + ", ".join(f"{lbl} {e['score']:.2f}" for lbl, e in ordered)
+              + (f" | senza valutazione: {[c for c in candidates if c not in scores]}"
+                 if len(scores) < len(candidates) else ""))
+
+        choice = choose_next(scores, self.next_object_min_score)
+        if choice is None:
+            print(f"  ℹ️ Nessun oggetto sopra {self.next_object_min_score:.2f}: nessun successivo.")
+            self.active_target_label = None
+            return
+        label, score, reason = choice
+        self.active_target_label = label
+        print(f"  → Grasp di '{grasped_label}' rilevato. Prossimo target suggerito: '{label}' "
+              f"(punteggio {score:.2f}: {reason})")
+
+    def advance_to_next_object_spatial(self, grasped_label):
         """Cerca tra le relazioni del nodo appena graspato quella funzionale
         con conteggio più alto, e la imposta come nuovo target attivo."""
         grasped_node = next((n for n in scene_graph if n['label'] == grasped_label), None)

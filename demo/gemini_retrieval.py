@@ -265,6 +265,78 @@ Rispondi SOLO con un oggetto JSON, senza testo aggiuntivo, in questo formato:
     }
 
 
+# ── 4. Punteggio del prossimo oggetto (Stadio D semantico, 24/09/2026) ──
+def score_next_objects(grasped_label, candidate_labels, model=MODEL):
+    """
+    Usata da demo/functional_relations.py per riempire la tabella su disco:
+    per ogni candidato, quanto e' plausibile che sia il prossimo oggetto da
+    usare dopo aver afferrato grasped_label, giudicando solo dai NOMI (la
+    posizione nella scena non conta, vedi Metodologia 24/09). Una sola
+    richiesta per tutti i candidati dello stesso oggetto afferrato.
+
+    Ritorna {label: {"score": float, "reason": str}} solo per le label
+    richieste, o None se Gemini non risponde o la risposta non e' parsabile.
+    """
+    client = get_client()
+    candidates_json = json.dumps(list(candidate_labels), ensure_ascii=False)
+
+    prompt = f"""Sei l'assistente semantico di un robot manipolatore in teleoperazione
+condivisa. L'utente ha appena afferrato l'oggetto "{grasped_label}".
+Il sistema vuole suggerirgli l'oggetto successivo con cui interagire.
+
+Oggetti presenti nella scena (nomi delle classi Visual Genome):
+{candidates_json}
+
+Per ciascuno di questi oggetti, stima quanto e' plausibile che sia il
+prossimo oggetto usato insieme a "{grasped_label}" in un compito quotidiano
+reale (versare, riempire, aprire, mangiare, riporre insieme, usare uno
+strumento sull'altro). Giudica solo dai nomi: la posizione degli oggetti
+nella scena non e' nota e non conta.
+- 1.0 = uso congiunto tipico e diretto (es. bottiglia -> bicchiere per versare)
+- 0.5 = collegamento possibile ma debole o indiretto
+- 0.0 = nessun legame d'uso
+
+Rispondi SOLO con un oggetto JSON, senza testo aggiuntivo, con una chiave per
+ogni oggetto della lista (scritta esattamente come nella lista):
+{{"<oggetto>": {{"score": 0.0-1.0, "reason": "breve motivazione in italiano"}}, ...}}
+"""
+
+    for attempt in range(3):
+        try:
+            response = client.models.generate_content(
+                model=model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.0,
+                    response_mime_type="application/json",
+                ),
+            )
+            break
+        except Exception as e:
+            if attempt < 2:
+                print(f"[gemini_retrieval] Tentativo {attempt+1} fallito: {e}. Riprovo tra 3s...")
+                time.sleep(3)
+            else:
+                print(f"[gemini_retrieval] Tutti i tentativi falliti: {e}")
+                return None
+
+    raw = (response.text or "").strip()
+    raw = raw.replace("```json", "").replace("```", "").strip()
+
+    try:
+        result = json.loads(raw)
+    except json.JSONDecodeError:
+        print(f"[gemini_retrieval] Risposta non parsabile: {raw!r}")
+        return None
+
+    if not isinstance(result, dict):
+        print(f"[gemini_retrieval] Risposta in formato inatteso: {result!r}")
+        return None
+
+    # Tieni solo le label richieste (stesso filtro di sicurezza di resolve_targets).
+    return {lbl: v for lbl, v in result.items() if lbl in candidate_labels and isinstance(v, dict)}
+
+
 # ── Test standalone (senza ROS2 / senza telecamera) ─────────
 if __name__ == "__main__":
     # Mini scene_graph finto per provare la pipeline a tavolino,
