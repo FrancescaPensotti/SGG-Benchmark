@@ -105,6 +105,9 @@ VG_TO_FUNCTIONAL = {
 VG_TO_SPATIAL = {
     'above':       'higher_than',
     'below':       'lower_than',
+    # 'under' e' il predicato che VG150 produce davvero ('below' non e' tra i
+    # 50 del modello): aggiunto il 25/09/2026.
+    'under':       'lower_than',
     'behind':      'behind',
     'in front of': 'in_front_of',
     'left of':     'left_of',
