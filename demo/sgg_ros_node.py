@@ -516,6 +516,10 @@ class SGGNode(Node):
         # Solo con depth valida.
         self.declare_parameter('center_depth_correction', False)
         self.declare_parameter('center_max_offset', 0.04)
+        # Meno profondita' (25/09/2026): con il tetto di 4 cm la punta delle
+        # dita toccava il tavolo; all'offset si tolgono center_depth_margin m.
+        self.declare_parameter('center_depth_margin', 0.02)
+        self.center_depth_margin = self.get_parameter('center_depth_margin').get_parameter_value().double_value
         self.center_depth_correction = self.get_parameter('center_depth_correction').get_parameter_value().bool_value
         self.center_max_offset = self.get_parameter('center_max_offset').get_parameter_value().double_value
         self.next_object_mode = self.get_parameter('next_object_mode').get_parameter_value().string_value
@@ -890,7 +894,7 @@ class SGGNode(Node):
         offset_txt = ""
         if self.center_depth_correction and sorgente == 'depth' and bbox is not None:
             lato_px = min(bbox[2] - bbox[0], bbox[3] - bbox[1])
-            r = min(0.5 * lato_px * z / CAMERA_MATRIX[0, 0], self.center_max_offset)
+            r = max(0.0, min(0.5 * lato_px * z / CAMERA_MATRIX[0, 0], self.center_max_offset) - self.center_depth_margin)
             p = p * (np.linalg.norm(p) + r) / np.linalg.norm(p)   # avanti di r lungo il raggio
             offset_txt = f", +{r*100:.1f} cm verso il centro"
         msg = PointStamped()
