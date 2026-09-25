@@ -508,6 +508,16 @@ class SGGNode(Node):
         # dell'LLM su disco (demo/functional_relations.py).
         self.declare_parameter('next_object_mode', 'off')
         self.declare_parameter('next_object_min_score', 0.5)
+        # Correzione verso il centro dell'oggetto (25/09/2026): la depth al
+        # centro del riquadro e' quella della superficie verso la camera, e le
+        # prese risultavano "superficiali". Con true il punto viene spostato
+        # lungo il raggio della camera di meta' del lato corto del riquadro
+        # (convertito in metri con la depth), al massimo center_max_offset.
+        # Solo con depth valida.
+        self.declare_parameter('center_depth_correction', False)
+        self.declare_parameter('center_max_offset', 0.04)
+        self.center_depth_correction = self.get_parameter('center_depth_correction').get_parameter_value().bool_value
+        self.center_max_offset = self.get_parameter('center_max_offset').get_parameter_value().double_value
         self.next_object_mode = self.get_parameter('next_object_mode').get_parameter_value().string_value
         self.next_object_min_score = self.get_parameter('next_object_min_score').get_parameter_value().double_value
         if self.next_object_mode not in ('off', 'spaziale', 'semantica'):
@@ -876,12 +886,19 @@ class SGGNode(Node):
             self.get_logger().warn("Nessuna profondita' disponibile (ne' depth ne' ArUco): non pubblico il target.")
             return
         pm = pixel_to_meters_3d(pos_pixel[0], pos_pixel[1], z, CAMERA_MATRIX)
+        p = np.array([pm[0], pm[1], z], dtype=float)
+        offset_txt = ""
+        if self.center_depth_correction and sorgente == 'depth' and bbox is not None:
+            lato_px = min(bbox[2] - bbox[0], bbox[3] - bbox[1])
+            r = min(0.5 * lato_px * z / CAMERA_MATRIX[0, 0], self.center_max_offset)
+            p = p * (np.linalg.norm(p) + r) / np.linalg.norm(p)   # avanti di r lungo il raggio
+            offset_txt = f", +{r*100:.1f} cm verso il centro"
         msg = PointStamped()
         msg.header.frame_id = "camera_color_optical_frame"
         msg.header.stamp = self.get_clock().now().to_msg()
-        msg.point.x = float(pm[0])
-        msg.point.y = float(pm[1])
-        msg.point.z = float(z)
+        msg.point.x = float(p[0])
+        msg.point.y = float(p[1])
+        msg.point.z = float(p[2])
         self.target_pub.publish(msg)
         self._last_target_publish_time = time.time()
         if bbox is not None:
@@ -893,7 +910,7 @@ class SGGNode(Node):
         # per poter allineare a occhio quando serve, aggiunto il 21/09/2026.
         if now - self._last_target_print >= self._print_throttle_s:
             self._last_target_print = now
-            print(f"  → [{now:.3f}] Target pubblicato su /sgg/target_point: ({pm[0]:.3f}, {pm[1]:.3f}, {z:.3f}) [frame camera, z da {sorgente}]")
+            print(f"  → [{now:.3f}] Target pubblicato su /sgg/target_point: ({p[0]:.3f}, {p[1]:.3f}, {p[2]:.3f}) [frame camera, z da {sorgente}{offset_txt}]")
 
     def gripper_status_callback(self, msg: Bool):
         """Ogni messaggio su questo topic è già un grasp confermato (ET_node ha
