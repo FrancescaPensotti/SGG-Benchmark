@@ -456,6 +456,11 @@ class SGGNode(Node):
         # active_target_label come dopo un `t`.
         self.suggested_label = None
         self._suggestion_released = False   # pinza riaperta, in attesa del silenzio sul target
+        # Oggetto in mano (25/09/2026): dopo una presa confermata la selezione
+        # automatica dello Stadio B resta ferma finche' la pinza non viene
+        # riaperta, altrimenti riselezionerebbe l'oggetto appena preso (ancora
+        # in vista) e i suoi messaggi terrebbero ET_node nella zona di grasp.
+        self._holding_object = False
         self._last_target_publish_time = 0.0
         # Nomi degli oggetti visti in modo stabile dall'avvio, senza posizione
         # e senza decadimento: la scelta semantica ha bisogno solo dei nomi, e
@@ -660,6 +665,7 @@ class SGGNode(Node):
                 # Con un suggerimento dello Stadio D in attesa la selezione
                 # automatica resta ferma: sceglierebbe l'oggetto in mano.
                 if (self.active_target_label is None and self.suggested_label is None
+                        and not self._holding_object
                         and self.auto_select_single_target and dbg is not None):
                     # Solo oggetti visti in QUESTO ciclo: i nodi in memoria
                     # (frames_not_seen > 0) non devono contare come secondo
@@ -895,6 +901,7 @@ class SGGNode(Node):
         necessaria qui."""
         if self.arbiter is not None:
             self.arbiter.reset()   # la scelta dell'arbitro vale fino al grasp
+        self._holding_object = True
         if self.active_target_label is None:
             return
         self.advance_to_next_object(self.active_target_label)
@@ -922,6 +929,9 @@ class SGGNode(Node):
             print(f"  💡 Suggerito '{self.suggested_label}': si attiva quando la pinza viene riaperta.")
 
     def gripper_occupied_callback(self, msg: Bool):
+        if not msg.data and self._holding_object:
+            self._holding_object = False
+            print("  Pinza riaperta: selezione automatica di nuovo attiva.")
         if msg.data or self.suggested_label is None:
             return
         self._suggestion_released = True
