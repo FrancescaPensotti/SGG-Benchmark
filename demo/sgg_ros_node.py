@@ -155,6 +155,16 @@ _last_decay_time = None  # tempo reale (time.time()) dell'ultimo decadimento app
 _next_node_uid = itertools.count()
 
 
+def _quat_to_matrix(q):
+    """Matrice di rotazione da un quaternione (x, y, z, w)."""
+    x, y, z, w = np.asarray(q, dtype=float) / np.linalg.norm(q)
+    return np.array([
+        [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+        [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+        [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+    ])
+
+
 def node_by_uid(sg, uid):
     return next((n for n in sg if n.get('uid') == uid), None)
 
@@ -746,19 +756,21 @@ class SGGNode(Node):
     
     # ── Arbitro del target, modalita' ombra ────────────────────
     def _setup_arbiter(self):
-        # Import qui: con arbitro spento il nodo non dipende da TF.
-        import tf2_ros
-        from rclpy.time import Time
         from geometry_msgs.msg import PoseStamped
-        from tf2_geometry_msgs import do_transform_point
         from demo.target_arbiter import TargetArbiter
 
         self.arbiter = TargetArbiter()
-        self._tf_time_latest = Time()
-        self._do_transform_point = do_transform_point
-        self._tf_buffer = tf2_ros.Buffer()
-        self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
+        # Camera -> base con la stessa formula e gli stessi valori di ET_node
+        # (arucoPoseCallback: p_base = p_ee + R_ee (t_cam + R_cam p_cam)),
+        # non con la TF: in laboratorio nessuno pubblica tool0 ->
+        # camera_color_optical_frame (verificato il 25/09/2026, due alberi TF
+        # separati). Default = config/ur_camera_config.yaml di Energy-Tanks.
+        self.declare_parameter('offset_camera_tool0', [-0.0334477, -0.062187, 0.0873308])
+        self.declare_parameter('camera_to_tool0_quat', [-0.00163112, 0.00508842, 0.00484543, 0.999974])
+        self._t_cam = np.array(self.get_parameter('offset_camera_tool0').value, dtype=float)
+        self._q_cam = np.array(self.get_parameter('camera_to_tool0_quat').value, dtype=float)
         self._ee_pos = None
+        self._ee_quat = None
         self._master_pos = None
         self._pose_frames_logged = set()
         self._last_arbiter_print = 0.0
@@ -772,6 +784,9 @@ class SGGNode(Node):
 
     def _store_pose(self, msg, attr):
         setattr(self, attr, np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z]))
+        if attr == '_ee_pos':
+            o = msg.pose.orientation
+            self._ee_quat = np.array([o.x, o.y, o.z, o.w])
         # Il disegno assume entrambe le pose in base_link: lo si verifica qui,
         # una volta per topic.
         if attr not in self._pose_frames_logged:
@@ -780,12 +795,11 @@ class SGGNode(Node):
 
     def _arbiter_shadow_step(self):
         """Un ciclo dell'arbitro sugli oggetti visti ora: solo log."""
-        try:
-            tf = self._tf_buffer.lookup_transform('base_link', 'camera_color_optical_frame',
-                                                  self._tf_time_latest)
-        except Exception as exc:
-            self._arbiter_print(f"TF camera->base_link non disponibile ({type(exc).__name__}): nessuna decisione.")
+        if self._ee_quat is None:
+            self._arbiter_print("posa del robot non ancora ricevuta: nessuna decisione.")
             return
+        R_ee = _quat_to_matrix(self._ee_quat)
+        R_cam = _quat_to_matrix(self._q_cam)
 
         candidates = []
         for n in scene_graph:
@@ -799,12 +813,10 @@ class SGGNode(Node):
             if z is None:
                 continue
             pm = pixel_to_meters_3d(pos[0], pos[1], z, CAMERA_MATRIX)
-            p = PointStamped()
-            p.header.frame_id = 'camera_color_optical_frame'
-            p.point.x, p.point.y, p.point.z = float(pm[0]), float(pm[1]), float(z)
-            pb = self._do_transform_point(p, tf).point
+            p_cam = np.array([pm[0], pm[1], z], dtype=float)
+            pb = self._ee_pos + R_ee @ (self._t_cam + R_cam @ p_cam)
             candidates.append({'uid': n['uid'], 'label': n['label'], 'bbox': bbox,
-                               'position_base': (pb.x, pb.y, pb.z)})
+                               'position_base': tuple(float(v) for v in pb)})
 
         if self._ee_pos is None:
             raw_dir, ee, posa = None, np.zeros(3), "posa robot assente"
