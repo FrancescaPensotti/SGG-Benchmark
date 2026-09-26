@@ -791,15 +791,16 @@ class SGGNode(Node):
         self._q_cam = np.array(self.get_parameter('camera_to_tool0_quat').value, dtype=float)
         self._ee_pos = None
         self._ee_quat = None
-        self._master_pos = None
+        self._last_ee_sample = 0.0
         self._pose_frames_logged = set()
         self._last_arbiter_print = 0.0
-        # TODO (audit): letterali da tenere allineati ai default pose_topic e
-        # desired_pose_topic dichiarati in ET_node.cpp (repo Energy-Tanks).
+        # La direzione dell'utente e' lo spostamento del polso nel tempo (vedi
+        # target_arbiter.py, revisione del 26/09): basta la posa del robot, il
+        # comando del Falcon non serve piu'.
+        # TODO (audit): letterale da tenere allineato al default pose_topic
+        # dichiarato in ET_node.cpp (repo Energy-Tanks).
         self.create_subscription(PoseStamped, '/admittance_controller/pose_debug',
                                  lambda m: self._store_pose(m, '_ee_pos'), 10)
-        self.create_subscription(PoseStamped, '/twist_to_pose_converter/desired_pose',
-                                 lambda m: self._store_pose(m, '_master_pos'), 10)
         self.get_logger().info("Arbitro in modalita' OMBRA: calcola e scrive nel log, non pubblica nulla.")
 
     def _store_pose(self, msg, attr):
@@ -807,6 +808,10 @@ class SGGNode(Node):
         if attr == '_ee_pos':
             o = msg.pose.orientation
             self._ee_quat = np.array([o.x, o.y, o.z, o.w])
+            now = time.time()
+            if now - self._last_ee_sample >= 0.05:   # la posa arriva a centinaia di Hz
+                self._last_ee_sample = now
+                self.arbiter.observe_ee(self._ee_pos, now)
         # Il disegno assume entrambe le pose in base_link: lo si verifica qui,
         # una volta per topic.
         if attr not in self._pose_frames_logged:
@@ -838,14 +843,9 @@ class SGGNode(Node):
             candidates.append({'uid': n['uid'], 'label': n['label'], 'bbox': bbox,
                                'position_base': tuple(float(v) for v in pb)})
 
-        if self._ee_pos is None:
-            raw_dir, ee, posa = None, np.zeros(3), "posa robot assente"
-        elif self._master_pos is None:
-            raw_dir, ee, posa = None, self._ee_pos, "comando Falcon assente"
-        else:
-            raw_dir, ee, posa = self._master_pos - self._ee_pos, self._ee_pos, "ok"
-
-        res = self.arbiter.step(candidates, raw_dir, ee, time.time())
+        known_uids = {n['uid'] for n in scene_graph}
+        res = self.arbiter.step(candidates, self._ee_pos, time.time(), known_uids)
+        posa = "ok"
 
         names = {c['uid']: f"{c['label']}#{c['uid']}" for c in candidates}
         names_all = {n['uid']: f"{n['label']}#{n['uid']}" for n in scene_graph}

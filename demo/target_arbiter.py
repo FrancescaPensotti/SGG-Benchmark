@@ -3,17 +3,31 @@ Arbitro del target per lo Stadio C: fra piu' oggetti visti, sceglie quello
 verso cui l'utente si sta dirigendo col Falcon.
 
 Vive lato percezione e non dipende da ROS: riceve candidati gia' portati in
-base_link e la direzione dell'utente, restituisce l'uid del target scelto.
-Il chiamante (sgg_ros_node.py) pubblica il vincitore sul normale canale a
-target singolo (/sgg/target_point), come dopo un comando `t`: ET_node non
-cambia e il canale multi-candidato resta spento (vedi Metodologia, 23-24/09).
+base_link e la posizione del polso nel tempo, restituisce l'uid del target
+scelto. Il chiamante (sgg_ros_node.py) pubblica il vincitore sul normale
+canale a target singolo (/sgg/target_point), come dopo un comando `t`:
+ET_node non cambia e il canale multi-candidato resta spento (vedi
+Metodologia, 23-24/09).
 
-Ogni pezzo e' una funzione pura e si puo' spegnere dai parametri. Con un solo
-candidato l'arbitro lo sceglie senza bisogno di direzione (= Stadio B).
-La scelta avviene una volta sola, poi resta bloccata come dopo un `t`.
+Ogni pezzo e' una funzione pura e si puo' spegnere dai parametri. La scelta
+avviene una volta sola, poi resta bloccata come dopo un `t`.
+
+Revisione del 26/09/2026, dopo le prove in ombra del 25/09:
+- la direzione dell'utente e' lo spostamento del polso negli ultimi
+  direction_window secondi, non "comando Falcon - posizione robot": il robot
+  segue il Falcon da vicino e quella differenza era quasi sempre nulla
+  (mediana 0.000 m sui 260 cicli del 25/09);
+- un oggetto solo in vista non viene piu' scelto automaticamente: serve che
+  l'utente si muova verso di lui, come con piu' oggetti (il 25/09 l'arbitro
+  si bloccava sul primo oggetto visto e non cambiava piu');
+- la scelta si sblocca se l'oggetto scelto non e' piu' nel grafo;
+- l'allineamento si misura nel piano orizzontale (x, y di base_link): con
+  il polso 40 cm sopra oggetti distanti 20 cm, in 3D entrambi sono
+  soprattutto "in basso" e i punteggi restavano troppo vicini (1.00 contro
+  0.91 anche andando dritti verso uno dei due).
 """
 
-import math
+from collections import deque
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -26,12 +40,13 @@ class ArbiterParams:
     min_alignment: float = 0.7
     # Il migliore deve superare il secondo almeno di questo, altrimenti ambiguo.
     min_margin: float = 0.1
-    # Sotto questa norma [m] della direzione (comando Falcon - posizione
-    # robot) l'utente e' considerato fermo: nessuna nuova decisione.
-    min_direction_norm: float = 0.01
-    # Costante di tempo [s] del filtro sulla direzione (tempo reale, non cicli).
-    direction_tau: float = 0.5
-    # Cicli consecutivi con la stessa proposta prima di cambiare target.
+    # Finestra [s] su cui si misura lo spostamento del polso.
+    direction_window: float = 2.0
+    # Sotto questo spostamento [m] nella finestra l'utente e' considerato fermo.
+    min_direction_norm: float = 0.02
+    # Direzione, vettori robot->oggetto e soglia di fermo solo su x e y.
+    horizontal_only: bool = True
+    # Cicli consecutivi con la stessa proposta prima di scegliere.
     hysteresis_cycles: int = 3
     # Scarta un candidato contenuto quasi tutto nella bbox di uno piu' grande
     # (es. 'cap' del nastro dentro 'bottle').
@@ -76,13 +91,15 @@ def drop_contained(candidates, ratio):
     return kept
 
 
-def alignment_scores(direction, ee_position, candidates):
-    """uid -> coseno fra `direction` e (posizione candidato - ee_position)."""
-    d = np.asarray(direction, dtype=float)
+def alignment_scores(direction, ee_position, candidates, horizontal_only=False):
+    """uid -> coseno fra `direction` e (posizione candidato - ee_position),
+    eventualmente solo sulle componenti x, y."""
+    mask = np.array([1.0, 1.0, 0.0]) if horizontal_only else np.ones(3)
+    d = np.asarray(direction, dtype=float) * mask
     dn = np.linalg.norm(d)
     scores = {}
     for c in candidates:
-        v = np.asarray(c['position_base'], dtype=float) - np.asarray(ee_position, dtype=float)
+        v = (np.asarray(c['position_base'], dtype=float) - np.asarray(ee_position, dtype=float)) * mask
         vn = np.linalg.norm(v)
         scores[c['uid']] = float(d.dot(v) / (dn * vn)) if dn > 0.0 and vn > 0.0 else -1.0
     return scores
@@ -101,33 +118,36 @@ def pick_winner(scores, min_alignment, min_margin):
     return best_uid
 
 
-class DirectionFilter:
-    """Media esponenziale su tempo reale: alpha = exp(-dt/tau)."""
+class MotionDirection:
+    """Spostamento del polso negli ultimi `window` secondi (tempo reale)."""
 
-    def __init__(self, tau):
-        self.tau = tau
-        self.value = None
-        self.last_t = None
+    def __init__(self, window):
+        self.window = window
+        self.samples = deque()   # (t, posizione)
 
-    def update(self, raw, t):
-        raw = np.asarray(raw, dtype=float)
-        if self.value is None:
-            self.value, self.last_t = raw, t
-            return self.value
-        dt = t - self.last_t
-        if dt <= 0.0:
-            # Orologio fermo o all'indietro: tieni il valore precedente.
-            return self.value
-        alpha = math.exp(-dt / self.tau)
-        self.value = alpha * self.value + (1.0 - alpha) * raw
-        self.last_t = t
-        return self.value
+    def observe(self, position, t):
+        if self.samples and t <= self.samples[-1][0]:
+            return               # orologio fermo o all'indietro: campione ignorato
+        self.samples.append((t, np.asarray(position, dtype=float)))
+        # Tiene un solo campione piu' vecchio della finestra, come riferimento.
+        while len(self.samples) > 2 and self.samples[1][0] <= t - self.window:
+            self.samples.popleft()
+
+    def direction(self, now):
+        """Vettore fra il campione piu' vecchio nella finestra e il piu' recente,
+        o None se non ci sono abbastanza campioni recenti."""
+        if len(self.samples) < 2 or now - self.samples[-1][0] > self.window:
+            return None
+        return self.samples[-1][1] - self.samples[0][1]
+
+    def clear(self):
+        self.samples.clear()
 
 
 class TargetArbiter:
     def __init__(self, params=None):
         self.p = params or ArbiterParams()
-        self.direction = DirectionFilter(self.p.direction_tau)
+        self.motion = MotionDirection(self.p.direction_window)
         self.target_uid = None
         self._last_proposal = None
         self._streak = 0
@@ -138,22 +158,35 @@ class TargetArbiter:
         self._last_proposal = None
         self._streak = 0
 
-    def step(self, candidates, raw_direction, ee_position, now):
+    def observe_ee(self, position, t):
+        """Posizione del polso in base_link; da chiamare spesso (es. ogni 50 ms)."""
+        self.motion.observe(position, t)
+
+    def step(self, candidates, ee_position, now, known_uids=None):
         """
         candidates: lista di dict con 'uid', 'label', 'bbox' (x1,y1,x2,y2 pixel)
             e 'position_base' (3 valori, base_link) -- solo oggetti visti ora.
-        raw_direction: comando Falcon - posizione robot (base_link), o None.
+        ee_position: posizione attuale del polso (base_link).
+        known_uids: uid di tutti i nodi ancora nel grafo (visti o in memoria);
+            se la scelta non e' fra questi, si sblocca.
         """
-        direction = None
-        if raw_direction is not None:
-            direction = self.direction.update(raw_direction, now)
+        direction = self.motion.direction(now)
+        if direction is not None and self.p.horizontal_only:
+            direction = direction * np.array([1.0, 1.0, 0.0])
         dnorm = float(np.linalg.norm(direction)) if direction is not None else 0.0
+
+        if self.target_uid is not None and known_uids is not None and self.target_uid not in known_uids:
+            self.reset()
+            forgotten = True
+        else:
+            forgotten = False
 
         # Scelta una volta sola (24/09/2026): dopo la selezione l'arbitro si
         # comporta come un comando `t` e non cambia piu' idea -- niente cambi
         # di target nei secondi prima della zona di grasp, quando ET_node sta
         # riempiendo la media delle letture da congelare, e niente cambi per
-        # occlusione da vicino. Si riparte solo con reset() (`x` o grasp).
+        # occlusione da vicino. Si riparte con reset() (`x` o grasp) o quando
+        # l'oggetto scelto viene dimenticato.
         if self.target_uid is not None:
             return ArbiterResult(self.target_uid, None, "scelta bloccata", {}, dnorm)
 
@@ -163,14 +196,17 @@ class TargetArbiter:
         scores = {}
         if not candidates:
             proposal, reason = None, "nessun candidato"
-        elif len(candidates) == 1:
-            proposal, reason = candidates[0]['uid'], "unico candidato"
         elif dnorm < self.p.min_direction_norm:
             proposal, reason = None, "utente fermo"
         else:
-            scores = alignment_scores(direction, ee_position, candidates)
+            # Stesso criterio con uno o piu' candidati: l'utente deve andare
+            # verso l'oggetto (con uno solo il margine non conta).
+            scores = alignment_scores(direction, ee_position, candidates, self.p.horizontal_only)
             proposal = pick_winner(scores, self.p.min_alignment, self.p.min_margin)
             reason = "allineato" if proposal is not None else "ambiguo"
+
+        if forgotten:
+            reason = "scelta dimenticata, " + reason
 
         if proposal is None:
             # Nessuna proposta: la conferma riparte da capo.
