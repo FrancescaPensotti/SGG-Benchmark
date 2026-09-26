@@ -580,6 +580,11 @@ class SGGNode(Node):
 
         # Publisher della posizione del target verso il nodo MoveIt
         self.target_pub = self.create_publisher(PointStamped, '/sgg/target_point', 10)
+        # Annullamento esplicito del target per ET_node (26/09/2026): dentro la
+        # zona di grasp ET_node non aspetta piu' che il target scada, esce
+        # (con ritirata) quando riceve questo messaggio. Deve combaciare con
+        # il parametro target_cancel_topic di ET_node.cpp.
+        self.target_cancel_pub = self.create_publisher(Bool, '/sgg/target_cancel', 10)
 
         # Bbox pixel [x1, y1, x2, y2] del target, verso graspnet_node.py
         # (22/09/2026): stesso identico refuso-a-runtime possibile di
@@ -1256,6 +1261,9 @@ class SGGNode(Node):
                     else:
                         print(f"  → Deselezionato target attivo: '{self.active_target_label}'")
                         self.active_target_label = None
+                    # Sempre, anche senza target attivo: se ET_node e' nella
+                    # zona di grasp ne esce (con ritirata), altrimenti non fa nulla.
+                    self.target_cancel_pub.publish(Bool(data=True))
                         
                 elif cmd == 'v':
                     # Verifica posizioni: distanze a coppie + posizione relativa al marker ArUco
