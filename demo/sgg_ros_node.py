@@ -68,6 +68,11 @@ DEPTH_WINDOW = 5  # finestra NxN attorno al pixel target per mediare il depth e 
 # a 0.218 m ha spostato il target di oltre 10 cm in un ciclo, facendo scattare il
 # braccio all'indietro.
 MIN_VALID_DEPTH_M = 0.25
+# Sopra questa distanza la lettura e' scartata (27/09/2026): il 25/09, con
+# l'oggetto preso davanti alla camera, la RealSense ha restituito 65535 mm
+# (valore di lettura non valida) e il codice, che scartava solo gli zeri, l'ha
+# preso per 65.5 m. Nella scena del lab nulla e' oltre ~1 m.
+MAX_VALID_DEPTH_M = 2.0
 
 # Margine dal bordo dell'immagine (in pixel) entro cui un oggetto è considerato
 # "vicino al bordo" — se l'ultima posizione nota di un nodo era in questa fascia,
@@ -148,6 +153,7 @@ print(f"Pronti! Uso: {device}")
 # rclpy nel loro insieme e command_loop).
 scene_graph = []
 current_z = None  # aggiornata quando viene rilevato un marker ArUco
+current_z_time = None  # time.time() dell'ultimo aggiornamento di current_z
 _last_decay_time = None  # tempo reale (time.time()) dell'ultimo decadimento applicato, per il dt in update_scene_graph
 
 # Identificatore stabile di ogni nodo: le relazioni lo usano al posto
@@ -210,7 +216,7 @@ def read_depth_at_pixel(depth_frame, cx_pixel, cy_pixel, window=DEPTH_WINDOW):
     x0, x1 = max(0, int(cx_pixel) - half), min(w, int(cx_pixel) + half + 1)
     y0, y1 = max(0, int(cy_pixel) - half), min(h, int(cy_pixel) + half + 1)
     patch = depth_frame[y0:y1, x0:x1].astype(np.float32)
-    valid = patch[patch > 0]
+    valid = patch[(patch > 0) & (patch <= MAX_VALID_DEPTH_M * 1000.0)]
     if valid.size == 0:
         return None
     depth_mm = np.median(valid)
@@ -519,6 +525,18 @@ class SGGNode(Node):
         # Meno profondita' (25/09/2026): con il tetto di 4 cm la punta delle
         # dita toccava il tavolo; all'offset si tolgono center_depth_margin m.
         self.declare_parameter('center_depth_margin', 0.02)
+        # Eta' massima [s] della z di riserva (piano ArUco o ultima depth del
+        # target), usata quando la depth nel pixel non e' valida (27/09/2026).
+        # Oltre questa eta' non si calcola la posizione e il target non viene
+        # pubblicato: una z vecchia, presa da un altro punto di vista, mette
+        # il target lungo il raggio alla profondita' sbagliata (il 25/09 la
+        # media congelata da ET_node era fatta di 5 letture con la stessa z
+        # per 12 s mentre il braccio scendeva). 0 = controllo spento, come
+        # prima. Dal 26/09 ET_node non ha piu' bisogno dei messaggi per restare
+        # nella zona di grasp, quindi non pubblicare non la interrompe.
+        self.declare_parameter('aruco_z_max_age', 0.0)
+        self.aruco_z_max_age = self.get_parameter('aruco_z_max_age').get_parameter_value().double_value
+        self._last_stale_z_print = 0.0
         self.center_depth_margin = self.get_parameter('center_depth_margin').get_parameter_value().double_value
         self.center_depth_correction = self.get_parameter('center_depth_correction').get_parameter_value().bool_value
         self.center_max_offset = self.get_parameter('center_max_offset').get_parameter_value().double_value
@@ -618,9 +636,10 @@ class SGGNode(Node):
 
                 # Rileva ArUco e aggiorna Z e scala
                 aruco_results, _, _ = detect_aruco(frame)
-                global current_z, SCALA_PIXEL_METRI
+                global current_z, current_z_time, SCALA_PIXEL_METRI
                 if aruco_results:
                     current_z = aruco_results[0]['z']
+                    current_z_time = time.time()
                     SCALA_PIXEL_METRI = calcola_scala_da_aruco(aruco_results[0]['corners'])
                     # Calibrazione: distanza tra due marker
                     if len(aruco_results) >= 2:
@@ -663,6 +682,7 @@ class SGGNode(Node):
                             depth_m = None
                         if depth_m is not None:
                             current_z = depth_m
+                            current_z_time = time.time()
                             print(f"  📏 Fallback depth attivo: z={depth_m:.3f}m (pixel {pos_pixel})")
                         else:
                             print(f"  ⚠️ Fallback depth: nessuna lettura valida nella finestra attorno a {pos_pixel} (troppo vicino/fuori range?) — z invariata")
@@ -883,6 +903,13 @@ class SGGNode(Node):
                 print(f"  ⚠️ Depth {depth_m:.3f} m sotto il minimo affidabile "
                       f"({MIN_VALID_DEPTH_M} m) nel pixel {pos_pixel}: lettura scartata.")
         if current_z is not None:
+            age = time.time() - current_z_time if current_z_time is not None else float('inf')
+            if self.aruco_z_max_age > 0.0 and age > self.aruco_z_max_age:
+                if not quiet and time.time() - self._last_stale_z_print >= self._print_throttle_s:
+                    self._last_stale_z_print = time.time()
+                    print(f"  ⚠️ Depth non valida nel pixel {pos_pixel} e z di riserva vecchia di {age:.1f} s "
+                          f"(> {self.aruco_z_max_age:.1f} s): posizione non calcolata.")
+                return None, None
             return current_z, 'aruco'
         return None, None
 
@@ -892,7 +919,8 @@ class SGGNode(Node):
         usato da graspnet_node.py per il crop X/Y lato server)."""
         z, sorgente = self.z_for_pixel(pos_pixel)
         if z is None:
-            self.get_logger().warn("Nessuna profondita' disponibile (ne' depth ne' ArUco): non pubblico il target.")
+            self.get_logger().warn("Nessuna profondita' valida (depth non valida, z ArUco assente o vecchia): non pubblico il target.",
+                                   throttle_duration_sec=2.0)
             return
         pm = pixel_to_meters_3d(pos_pixel[0], pos_pixel[1], z, CAMERA_MATRIX)
         p = np.array([pm[0], pm[1], z], dtype=float)
