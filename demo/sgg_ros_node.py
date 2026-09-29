@@ -587,6 +587,18 @@ class SGGNode(Node):
         # la riapertura attiva l'oggetto suggerito dallo Stadio D.
         self.gripper_occupied_sub = self.create_subscription(
             Bool, '/gripper/occupied', self.gripper_occupied_callback, 10)
+        # Zona di grasp di nuovo disponibile (ET_node, 29/09/2026): dopo un
+        # rilascio, una `x` o il tempo massimo nella zona ET_node la blocca
+        # finche' il polso non sale (release_unblock_rise). Finche' e' false
+        # niente scelte automatiche: Stadio B, arbitro e suggerito dello
+        # Stadio D aspettano, cosi' l'oggetto appena lasciato non torna subito
+        # target. True di default: senza ET_node il nodo si comporta come prima.
+        from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
+        self.zone_ready = True
+        self.zone_ready_sub = self.create_subscription(
+            Bool, '/et_node/grasp_zone_ready', self.zone_ready_callback,
+            QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                       durability=DurabilityPolicy.TRANSIENT_LOCAL))
 
         # Subscriber RealSense
         self.subscription = self.create_subscription(
@@ -710,7 +722,7 @@ class SGGNode(Node):
                 # Con un suggerimento dello Stadio D in attesa la selezione
                 # automatica resta ferma: sceglierebbe l'oggetto in mano.
                 if (self.active_target_label is None and self.suggested_label is None
-                        and not self._holding_object
+                        and not self._holding_object and self.zone_ready
                         and self.auto_select_single_target and dbg is not None):
                     # Solo oggetti visti in QUESTO ciclo: i nodi in memoria
                     # (frames_not_seen > 0) non devono contare come secondo
@@ -739,7 +751,7 @@ class SGGNode(Node):
                               f"(unico oggetto visto per {AUTO_SELECT_STABLE_CYCLES} cicli consecutivi).")
 
                 # Arbitro in modalita' ombra: solo log, non tocca il target.
-                if self.arbiter is not None and dbg is not None:
+                if self.arbiter is not None and dbg is not None and self.zone_ready:
                     self._arbiter_shadow_step()
 
                 self.maybe_activate_suggestion()
@@ -1054,6 +1066,15 @@ class SGGNode(Node):
             self.active_target_label = None
             print(f"  💡 Suggerito '{self.suggested_label}': si attiva quando la pinza viene riaperta.")
 
+    def zone_ready_callback(self, msg: Bool):
+        if msg.data == self.zone_ready:
+            return
+        self.zone_ready = msg.data
+        if msg.data:
+            print("  Zona di grasp di nuovo disponibile: selezione automatica riattivata.")
+        else:
+            print("  Zona di grasp bloccata da ET_node: nessuna scelta automatica finche' il polso non sale.")
+
     def gripper_occupied_callback(self, msg: Bool):
         if not msg.data and self._holding_object:
             self._holding_object = False
@@ -1071,7 +1092,7 @@ class SGGNode(Node):
         """Attiva il suggerito se la pinza e' stata riaperta e il target
         precedente e' scaduto in ET_node. Chiamata alla riapertura e a ogni
         ciclo di frame_callback."""
-        if self.suggested_label is None or not self._suggestion_released:
+        if self.suggested_label is None or not self._suggestion_released or not self.zone_ready:
             return
         if time.time() - self._last_target_publish_time < NEXT_TARGET_MIN_SILENCE_S:
             return
