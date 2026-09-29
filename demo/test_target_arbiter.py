@@ -236,6 +236,18 @@ def test_memoria_toglie_oggetti_usciti_dal_grafo():
     assert [c['uid'] for c in mem.candidates(1.0, known_uids={'A'})] == ['A']
 
 
+def test_memoria_tiene_oggetti_usciti_dal_grafo_e_li_sostituisce_per_posizione():
+    """Come il 29/09: la banana esce dal grafo e ricompare come 'bird'."""
+    banana = cand('b1', (0.30, 0.20, 0.0), label='banana')
+    bird = cand('b8', (0.31, 0.20, 0.0), label='bird')
+    mem = CandidateMemory(max_age=15.0)
+    mem.update([banana, B], 0.0)
+    mem.update([], 5.0)                     # banana tolta dal grafo: resta in memoria
+    assert {c['uid'] for c in mem.candidates(5.0)} == {'b1', 'B'}
+    mem.update([bird], 8.0)                 # ricompare con un altro uid nello stesso punto
+    assert {c['uid'] for c in mem.candidates(8.0)} == {'b8', 'B'}
+
+
 def test_memoria_scarta_il_contenuto_nello_stesso_ciclo():
     cap = cand('C', (0.3, 0.2, 0.05), bbox=(140, 110, 160, 130), label='cap')
     mem = CandidateMemory(max_age=10.0, contained_ratio=0.8)

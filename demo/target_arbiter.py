@@ -132,6 +132,13 @@ class CandidateMemory:
     riquadri sono confrontabili, e in quel ciclo si tolgono anche dalla
     memoria. Non restano esclusi per sempre: un riquadro grande occasionale
     (es. 'person') non deve cancellare un oggetto vero per tutta la prova.
+
+    La memoria e' legata alla posizione, non ai nomi (29/09/2026): se il
+    grafo toglie un nodo e lo stesso oggetto ricompare con un altro uid o
+    un'altra etichetta (banana vista come 'bird' o 'vase'), il nuovo nodo
+    nello stesso punto prende il posto del vecchio (merge_distance). Per
+    questo il chiamante puo' non passare known_uids e tenere in memoria
+    anche i nodi appena usciti dal grafo.
     """
 
     def __init__(self, max_age, contained_ratio=None, merge_distance=0.05):

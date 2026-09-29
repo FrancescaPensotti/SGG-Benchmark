@@ -930,14 +930,22 @@ class SGGNode(Node):
         # con la posizione in base_link di quando erano in vista.
         seen_uids = {c['uid'] for c in candidates}
         self.arbiter_memory.update(candidates, now)
-        candidates = self.arbiter_memory.candidates(now, known_uids)
+        # Anche i nodi appena usciti dal grafo restano candidati per
+        # arbiter_memory_s secondi (29/09/2026): la banana veniva tolta dal
+        # grafo mentre il polso era sopra la bottiglia, e l'arbitro non la
+        # vedeva piu' proprio mentre ci si muoveva verso di lei. La scelta si
+        # sblocca solo quando l'oggetto esce anche dalla memoria.
+        candidates = self.arbiter_memory.candidates(now)
+        memory_uids = set(self.arbiter_memory.entries)
         with self._pose_lock:
-            res = self.arbiter.step(candidates, ee_pos, now, known_uids)
+            res = self.arbiter.step(candidates, ee_pos, now, known_uids | memory_uids)
         posa = "ok"
 
         names = {c['uid']: f"{c['label']}#{c['uid']}" + ("" if c['uid'] in seen_uids else "(mem)")
                  for c in candidates}
         names_all = {n['uid']: f"{n['label']}#{n['uid']}" for n in scene_graph}
+        for uid, (_, c) in self.arbiter_memory.entries.items():
+            names_all.setdefault(uid, f"{c['label']}#{uid}(mem)")
         cand_txt = ", ".join(names[c['uid']] for c in candidates) or "nessuno"
         score_txt = " ".join(f"{names[u]}={s:.2f}" for u, s in res.scores.items()) or "-"
         prop_txt = names_all.get(res.proposal_uid, "nessuna") if res.proposal_uid is not None else "nessuna"
