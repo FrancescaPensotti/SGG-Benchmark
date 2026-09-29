@@ -451,6 +451,16 @@ def get_candidate_targets():
     ]
 
 # ── Nodo ROS2 ───────────────────────────────────────────────
+def _drop_contained_nodes(nodes, ratio=0.8):
+    """Nodi del grafo senza quelli il cui riquadro sta per almeno `ratio`
+    dentro il riquadro di un altro nodo piu' grande (stessa regola
+    dell'arbitro, demo/target_arbiter.py)."""
+    from demo.target_arbiter import drop_contained
+    with_box = [{'node': n, 'bbox': tuple(n['bbox'])} for n in nodes if n.get('bbox') is not None]
+    kept = {id(c['node']) for c in drop_contained(with_box, ratio)}
+    return [n for n in nodes if n.get('bbox') is None or id(n) in kept]
+
+
 class SGGNode(Node):
     def __init__(self):
         super().__init__('sgg_node')
@@ -490,6 +500,12 @@ class SGGNode(Node):
         # inseguimento continuo fuori zona di grasp, non voluto).
         self.declare_parameter('auto_select_single_target', False)
         self.auto_select_single_target = self.get_parameter('auto_select_single_target').get_parameter_value().bool_value
+        # Etichette che non sono oggetti da afferrare (29/09/2026): la mano e il
+        # corpo di chi prepara la scena entrano nel grafo. Esclusi dalla
+        # selezione automatica (Stadio B) e dall'arbitro.
+        self.declare_parameter('non_object_labels',
+                               ['person', 'man', 'woman', 'hand', 'arm', 'shirt', 'head', 'face'])
+        self.non_object_labels = set(self.get_parameter('non_object_labels').value)
         # Riquadri arancioni "(memoria)" nella finestra: spenti di default dal
         # 29/09/2026 (su richiesta, tolgono leggibilita'); gli oggetti restano
         # comunque in memoria nel grafo.
@@ -733,7 +749,13 @@ class SGGNode(Node):
                         if n['count'] >= FREQ_THRESHOLD
                         and n.get('confidence', 0.0) >= CONFIDENCE_REMOVE_THRESHOLD
                         and n.get('frames_not_seen', 0) == 0
+                        and n['label'] not in self.non_object_labels
                     ]
+                    # Una parte dentro un oggetto (29/09/2026: 'cap' della
+                    # bottiglia) non e' un secondo oggetto: si scartano i nodi
+                    # col riquadro contenuto per almeno l'80% in uno piu'
+                    # grande, come nell'arbitro (drop_contained).
+                    auto_candidates = _drop_contained_nodes(auto_candidates)
                     # Conferma su piu' cicli: con lo sfarfallio del rilevatore
                     # un singolo ciclo "pulito" potrebbe mostrare solo una
                     # parte dell'oggetto (es. 'cap' senza 'bottle').
@@ -831,11 +853,6 @@ class SGGNode(Node):
         self.declare_parameter('arbiter_hysteresis_cycles', d.hysteresis_cycles)
         self.declare_parameter('arbiter_direction_window', d.direction_window)
         self.declare_parameter('arbiter_memory_s', 15.0)
-        # Etichette che non sono oggetti da afferrare: la mano e il corpo di
-        # chi prepara la scena entrano nel grafo (prove del 29/09).
-        self.declare_parameter('arbiter_ignore_labels',
-                               ['person', 'man', 'woman', 'hand', 'arm', 'shirt', 'head', 'face'])
-        self.arbiter_ignore_labels = set(self.get_parameter('arbiter_ignore_labels').value)
         params = ArbiterParams(
             min_alignment=float(self.get_parameter('arbiter_min_alignment').value),
             hysteresis_cycles=int(self.get_parameter('arbiter_hysteresis_cycles').value),
@@ -922,7 +939,7 @@ class SGGNode(Node):
         candidates = []
         for n in scene_graph:
             if (n['count'] < FREQ_THRESHOLD or n.get('confidence', 0.0) < CONFIDENCE_REMOVE_THRESHOLD
-                    or n.get('frames_not_seen', 0) != 0 or n['label'] in self.arbiter_ignore_labels):
+                    or n.get('frames_not_seen', 0) != 0 or n['label'] in self.non_object_labels):
                 continue
             pos, bbox = n.get('position'), n.get('bbox')
             if pos is None or bbox is None:
