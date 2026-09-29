@@ -731,9 +731,13 @@ class SGGNode(Node):
                 # avanzare la conferma su dati vecchi.
                 if dbg is not None:
                     now_inv = time.time()
-                    for n in scene_graph:
-                        if n['count'] >= INVENTORY_MIN_COUNT and n.get('frames_not_seen', 0) == 0:
-                            self.session_inventory[n['label']] = now_inv
+                    # Inventario dello Stadio D senza mani/persone e senza
+                    # parti contenute in un altro oggetto (29/09/2026).
+                    seen_now = [n for n in scene_graph
+                                if n['count'] >= INVENTORY_MIN_COUNT and n.get('frames_not_seen', 0) == 0
+                                and n['label'] not in self.non_object_labels]
+                    for n in _drop_contained_nodes(seen_now):
+                        self.session_inventory[n['label']] = now_inv
 
                 # Con un suggerimento dello Stadio D in attesa la selezione
                 # automatica resta ferma: sceglierebbe l'oggetto in mano.
@@ -1123,11 +1127,16 @@ class SGGNode(Node):
     def advance_to_next_object_semantic(self, grasped_label):
         """Prossimo target dai nomi degli oggetti in scena (tabella LLM su
         disco): vince il candidato con punteggio piu' alto sopra soglia."""
+        # Stessi filtri dello Stadio B (29/09/2026): niente mani o persone, e
+        # niente parti contenute in un altro oggetto ('cap' della bottiglia
+        # appena presa, che l'LLM potrebbe legare forte a 'bottle').
         with self.lock:
-            in_graph = [n['label'] for n in scene_graph
-                        if n['count'] >= FREQ_THRESHOLD
-                        and n.get('confidence', 0.0) >= CONFIDENCE_REMOVE_THRESHOLD]
-            inventory = list(self.session_inventory)
+            nodes = [n for n in scene_graph
+                     if n['count'] >= FREQ_THRESHOLD
+                     and n.get('confidence', 0.0) >= CONFIDENCE_REMOVE_THRESHOLD
+                     and n['label'] not in self.non_object_labels]
+            in_graph = [n['label'] for n in _drop_contained_nodes(nodes)]
+            inventory = [lbl for lbl in self.session_inventory if lbl not in self.non_object_labels]
         # Anche gli oggetti visti prima e ora dimenticati dalla memoria: la
         # posizione servira' solo quando la camera li rivedra'.
         candidates = [c for c in dict.fromkeys(in_graph + inventory) if c != grasped_label]
