@@ -137,7 +137,10 @@ def test_scelta_dimenticata_si_sblocca():
     assert arb.target_uid == 'A'
     res, _, _ = run(arb, [B], 0.05 * unit_towards(B['position_base'], p), 1, start=p, t0=t, known_uids={'B'})
     assert res.reason.startswith("scelta dimenticata") and res.target_uid is None, res
-    res, _, _ = run(arb, [B], 0.05 * unit_towards(B['position_base'], p), N, start=p, t0=t + 1.0, known_uids={'B'})
+    # Cicli da 3 s come in laboratorio: con la finestra di 4 s serve che lo
+    # spostamento verso A esca dalla finestra prima di vedere B allineato.
+    res, _, _ = run(arb, [B], 0.05 * unit_towards(B['position_base'], p), N, start=p, t0=t + 1.0,
+                    cycle_dt=3.0, known_uids={'B'})
     assert res.target_uid == 'B', res
 
 

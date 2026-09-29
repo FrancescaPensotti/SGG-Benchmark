@@ -35,19 +35,20 @@ import numpy as np
 
 @dataclass
 class ArbiterParams:
-    # Coseno minimo fra direzione dell'utente e direzione robot->oggetto
-    # (0.7 ~ 45 gradi). Valori di partenza non tarati, da provare in lab.
-    min_alignment: float = 0.7
+    # Coseno minimo fra direzione dell'utente e direzione robot->oggetto.
+    # Valori tarati in laboratorio il 29/09/2026 (prove 7 quater-septies):
+    # soglia 0.6 (~53 gradi), conferma su 2 cicli, finestra di 4 s.
+    min_alignment: float = 0.6
     # Il migliore deve superare il secondo almeno di questo, altrimenti ambiguo.
     min_margin: float = 0.1
     # Finestra [s] su cui si misura lo spostamento del polso.
-    direction_window: float = 2.0
+    direction_window: float = 4.0
     # Sotto questo spostamento [m] nella finestra l'utente e' considerato fermo.
     min_direction_norm: float = 0.02
     # Direzione, vettori robot->oggetto e soglia di fermo solo su x e y.
     horizontal_only: bool = True
     # Cicli consecutivi con la stessa proposta prima di scegliere.
-    hysteresis_cycles: int = 3
+    hysteresis_cycles: int = 2
     # Scarta un candidato contenuto quasi tutto nella bbox di uno piu' grande
     # (es. 'cap' del nastro dentro 'bottle').
     suppress_contained: bool = True
