@@ -490,6 +490,11 @@ class SGGNode(Node):
         # inseguimento continuo fuori zona di grasp, non voluto).
         self.declare_parameter('auto_select_single_target', False)
         self.auto_select_single_target = self.get_parameter('auto_select_single_target').get_parameter_value().bool_value
+        # Riquadri arancioni "(memoria)" nella finestra: spenti di default dal
+        # 29/09/2026 (su richiesta, tolgono leggibilita'); gli oggetti restano
+        # comunque in memoria nel grafo.
+        self.declare_parameter('show_memory_boxes', False)
+        self.show_memory_boxes = self.get_parameter('show_memory_boxes').get_parameter_value().bool_value
         self._auto_select_last_label = None
         self._auto_select_streak = 0
 
@@ -751,7 +756,7 @@ class SGGNode(Node):
                 # del rilevatore (oggetto reale ancora presente, solo non
                 # rilevato in questo specifico frame).
                 display_img = self.img.copy()
-                for node in scene_graph:
+                for node in (scene_graph if self.show_memory_boxes else []):
                     if node.get('frames_not_seen', 0) > 0 and node.get('confidence', 0.0) >= CONFIDENCE_REMOVE_THRESHOLD:
                         bbox = node.get('bbox')
                         if bbox:
