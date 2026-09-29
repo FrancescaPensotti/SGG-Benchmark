@@ -1,0 +1,34 @@
+{
+  "pairs": {
+    "banana": {
+      "bottle": {
+        "reason": "Una banana può essere frullata e il frullato versato in una bottiglia. Oppure, si può bere da una bottiglia mentre si mangia una banana.",
+        "score": 0.5
+      },
+      "cup": {
+        "reason": "Una banana può essere frullata e il frullato versato in una tazza. Oppure, si può bere da una tazza mentre si mangia una banana.",
+        "score": 0.5
+      }
+    },
+    "bottle": {
+      "banana": {
+        "reason": "Non c'è un legame d'uso diretto o tipico tra una bottiglia e una banana in un compito quotidiano.",
+        "score": 0.0
+      },
+      "cup": {
+        "reason": "Si versa il contenuto di una bottiglia in una tazza/bicchiere.",
+        "score": 1.0
+      }
+    },
+    "cup": {
+      "banana": {
+        "reason": "Nessun legame d'uso diretto o tipico tra una banana e una tazza/bicchiere.",
+        "score": 0.0
+      },
+      "bottle": {
+        "reason": "Tipicamente si versa il contenuto di una bottiglia in una tazza/bicchiere.",
+        "score": 1.0
+      }
+    }
+  }
+}
