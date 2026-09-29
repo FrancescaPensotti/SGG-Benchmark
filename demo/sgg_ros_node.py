@@ -16,6 +16,7 @@ from std_msgs.msg import Bool, Float32MultiArray
 
 # ROS2
 import rclpy
+import rclpy.executors
 from rclpy.node import Node
 from sensor_msgs.msg import Image as RosImage
 
@@ -822,21 +823,41 @@ class SGGNode(Node):
         # La direzione dell'utente e' lo spostamento del polso nel tempo (vedi
         # target_arbiter.py, revisione del 26/09): basta la posa del robot, il
         # comando del Falcon non serve piu'.
+        # La posa si riceve su un nodo a parte con il suo executor, in un
+        # thread separato (29/09/2026): con rclpy.spin a singolo thread i
+        # messaggi restavano in coda per tutta l'elaborazione di un frame
+        # (3-5 s) e l'arbitro, che decide a fine frame, vedeva una posa piu'
+        # vecchia della sua finestra -> "utente fermo" anche con il polso in
+        # movimento (prove 7 e 7 bis del 29/09). _pose_lock protegge posa e
+        # campioni dell'arbitro, scritti da questo thread e letti da
+        # _arbiter_shadow_step.
         # TODO (audit): letterale da tenere allineato al default pose_topic
         # dichiarato in ET_node.cpp (repo Energy-Tanks).
-        self.create_subscription(PoseStamped, '/admittance_controller/pose_debug',
-                                 lambda m: self._store_pose(m, '_ee_pos'), 10)
+        self._pose_lock = threading.Lock()
+        self._pose_node = rclpy.create_node('sgg_arbiter_pose')
+        self._pose_node.create_subscription(PoseStamped, '/admittance_controller/pose_debug',
+                                            lambda m: self._store_pose(m, '_ee_pos'), 10)
+        self._pose_executor = rclpy.executors.SingleThreadedExecutor()
+        self._pose_executor.add_node(self._pose_node)
+        threading.Thread(target=self._spin_pose, daemon=True).start()
         self.get_logger().info("Arbitro in modalita' OMBRA: calcola e scrive nel log, non pubblica nulla.")
 
+    def _spin_pose(self):
+        try:
+            self._pose_executor.spin()
+        except Exception:
+            pass   # alla chiusura di rclpy
+
     def _store_pose(self, msg, attr):
-        setattr(self, attr, np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z]))
-        if attr == '_ee_pos':
-            o = msg.pose.orientation
-            self._ee_quat = np.array([o.x, o.y, o.z, o.w])
-            now = time.time()
-            if now - self._last_ee_sample >= 0.05:   # la posa arriva a centinaia di Hz
-                self._last_ee_sample = now
-                self.arbiter.observe_ee(self._ee_pos, now)
+        with self._pose_lock:
+            setattr(self, attr, np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z]))
+            if attr == '_ee_pos':
+                o = msg.pose.orientation
+                self._ee_quat = np.array([o.x, o.y, o.z, o.w])
+                now = time.time()
+                if now - self._last_ee_sample >= 0.05:   # la posa arriva a centinaia di Hz
+                    self._last_ee_sample = now
+                    self.arbiter.observe_ee(self._ee_pos, now)
         # Il disegno assume entrambe le pose in base_link: lo si verifica qui,
         # una volta per topic.
         if attr not in self._pose_frames_logged:
@@ -845,10 +866,13 @@ class SGGNode(Node):
 
     def _arbiter_shadow_step(self):
         """Un ciclo dell'arbitro sugli oggetti visti ora: solo log."""
-        if self._ee_quat is None:
+        with self._pose_lock:
+            ee_pos = None if self._ee_pos is None else self._ee_pos.copy()
+            ee_quat = None if self._ee_quat is None else self._ee_quat.copy()
+        if ee_quat is None:
             self._arbiter_print("posa del robot non ancora ricevuta: nessuna decisione.")
             return
-        R_ee = _quat_to_matrix(self._ee_quat)
+        R_ee = _quat_to_matrix(ee_quat)
         R_cam = _quat_to_matrix(self._q_cam)
 
         candidates = []
@@ -864,12 +888,13 @@ class SGGNode(Node):
                 continue
             pm = pixel_to_meters_3d(pos[0], pos[1], z, CAMERA_MATRIX)
             p_cam = np.array([pm[0], pm[1], z], dtype=float)
-            pb = self._ee_pos + R_ee @ (self._t_cam + R_cam @ p_cam)
+            pb = ee_pos + R_ee @ (self._t_cam + R_cam @ p_cam)
             candidates.append({'uid': n['uid'], 'label': n['label'], 'bbox': bbox,
                                'position_base': tuple(float(v) for v in pb)})
 
         known_uids = {n['uid'] for n in scene_graph}
-        res = self.arbiter.step(candidates, self._ee_pos, time.time(), known_uids)
+        with self._pose_lock:
+            res = self.arbiter.step(candidates, ee_pos, time.time(), known_uids)
         posa = "ok"
 
         names = {c['uid']: f"{c['label']}#{c['uid']}" for c in candidates}
