@@ -118,6 +118,53 @@ def pick_winner(scores, min_alignment, min_margin):
     return best_uid
 
 
+class CandidateMemory:
+    """Posizioni in base_link degli oggetti visti di recente (29/09/2026).
+
+    Con la camera in movimento il rilevatore perde gli oggetti per diversi
+    cicli: nelle prove del 29/09 in 13 cicli su 17 con il polso in movimento
+    non c'era nessun candidato "visto ora". La posizione in base_link di un
+    oggetto fermo non cambia con la camera, quindi resta valida finche' e'
+    recente (max_age secondi dall'ultima volta che e' stato visto).
+
+    I candidati contenuti nel riquadro di uno piu' grande (es. 'cap' dentro
+    'bottle') si scartano sui soli oggetti visti nello stesso ciclo, dove i
+    riquadri sono confrontabili, e in quel ciclo si tolgono anche dalla
+    memoria. Non restano esclusi per sempre: un riquadro grande occasionale
+    (es. 'person') non deve cancellare un oggetto vero per tutta la prova.
+    """
+
+    def __init__(self, max_age, contained_ratio=None):
+        self.max_age = max_age
+        self.contained_ratio = contained_ratio
+        self.entries = {}        # uid -> (t, candidato)
+
+    def update(self, seen, now):
+        """seen: candidati visti in questo ciclo (stesso formato di step())."""
+        kept = seen
+        if self.contained_ratio is not None:
+            kept = drop_contained(seen, self.contained_ratio)
+            kept_uids = {c['uid'] for c in kept}
+            for c in seen:
+                if c['uid'] not in kept_uids:
+                    self.entries.pop(c['uid'], None)
+        for c in kept:
+            self.entries[c['uid']] = (now, c)
+
+    def candidates(self, now, known_uids=None):
+        """Candidati visti negli ultimi max_age secondi e ancora nel grafo."""
+        out = []
+        for uid, (t, c) in list(self.entries.items()):
+            if now - t > self.max_age or (known_uids is not None and uid not in known_uids):
+                del self.entries[uid]
+                continue
+            out.append(c)
+        return out
+
+    def clear(self):
+        self.entries.clear()
+
+
 class MotionDirection:
     """Spostamento del polso negli ultimi `window` secondi (tempo reale)."""
 

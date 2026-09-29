@@ -14,8 +14,8 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from target_arbiter import (ArbiterParams, MotionDirection, TargetArbiter,  # noqa: E402
-                            alignment_scores, containment, drop_contained)
+from target_arbiter import (ArbiterParams, CandidateMemory, MotionDirection,  # noqa: E402
+                            TargetArbiter, alignment_scores, containment, drop_contained)
 
 EE0 = np.array([0.0, 0.0, 0.3])   # posizione iniziale del polso in base_link [m]
 N = ArbiterParams().hysteresis_cycles
@@ -220,6 +220,45 @@ def test_direzione_ignora_tempo_all_indietro():
 def test_punteggi_allineamento():
     s = alignment_scores(unit_towards(A['position_base']), EE0, [A, B])
     assert abs(s['A'] - 1.0) < 1e-9 and s['B'] < s['A']
+
+
+def test_memoria_tiene_oggetti_non_visti_per_max_age():
+    mem = CandidateMemory(max_age=10.0)
+    mem.update([A, B], 0.0)
+    mem.update([], 5.0)                     # ciclo in movimento: nessuno visto
+    assert {c['uid'] for c in mem.candidates(5.0)} == {'A', 'B'}
+    assert mem.candidates(11.0) == []       # troppo vecchi
+
+
+def test_memoria_toglie_oggetti_usciti_dal_grafo():
+    mem = CandidateMemory(max_age=10.0)
+    mem.update([A, B], 0.0)
+    assert [c['uid'] for c in mem.candidates(1.0, known_uids={'A'})] == ['A']
+
+
+def test_memoria_scarta_il_contenuto_nello_stesso_ciclo():
+    cap = cand('C', (0.3, 0.2, 0.05), bbox=(140, 110, 160, 130), label='cap')
+    mem = CandidateMemory(max_age=10.0, contained_ratio=0.8)
+    mem.update([A, cap], 0.0)
+    assert [c['uid'] for c in mem.candidates(0.0)] == ['A']
+
+
+def test_memoria_permette_la_scelta_con_il_rilevatore_intermittente():
+    """Come il 29/09: in movimento gli oggetti si vedono un ciclo su tre."""
+    arb = TargetArbiter()
+    mem = CandidateMemory(max_age=15.0)
+    p, t = EE0.copy(), 0.0
+    v = unit_towards(A['position_base']) * np.array([1, 1, 0]) * 0.03
+    arb.observe_ee(p, t)
+    res = None
+    for k in range(4 * N):
+        for _ in range(int(round(3.0 / 0.05))):   # cicli SGG da 3 s
+            t += 0.05
+            p = p + v * 0.05
+            arb.observe_ee(p, t)
+        mem.update([A, B] if k % 3 == 0 else [], t)
+        res = arb.step(mem.candidates(t), p, t)
+    assert res.target_uid == 'A', res
 
 
 if __name__ == '__main__':

@@ -808,9 +808,33 @@ class SGGNode(Node):
     # ── Arbitro del target, modalita' ombra ────────────────────
     def _setup_arbiter(self):
         from geometry_msgs.msg import PoseStamped
-        from demo.target_arbiter import TargetArbiter
+        from demo.target_arbiter import ArbiterParams, CandidateMemory, TargetArbiter
 
-        self.arbiter = TargetArbiter()
+        # Parametri dell'arbitro regolabili dal lancio (29/09/2026), per
+        # tararli in laboratorio senza toccare il codice. Default = quelli di
+        # ArbiterParams; il filtro sui riquadri contenuti si applica nella
+        # memoria dei candidati, sui soli oggetti visti nello stesso ciclo.
+        d = ArbiterParams()
+        self.declare_parameter('arbiter_min_alignment', d.min_alignment)
+        self.declare_parameter('arbiter_hysteresis_cycles', d.hysteresis_cycles)
+        self.declare_parameter('arbiter_direction_window', d.direction_window)
+        self.declare_parameter('arbiter_memory_s', 15.0)
+        # Etichette che non sono oggetti da afferrare: la mano e il corpo di
+        # chi prepara la scena entrano nel grafo (prove del 29/09).
+        self.declare_parameter('arbiter_ignore_labels',
+                               ['person', 'man', 'woman', 'hand', 'arm', 'shirt', 'head', 'face'])
+        self.arbiter_ignore_labels = set(self.get_parameter('arbiter_ignore_labels').value)
+        params = ArbiterParams(
+            min_alignment=float(self.get_parameter('arbiter_min_alignment').value),
+            hysteresis_cycles=int(self.get_parameter('arbiter_hysteresis_cycles').value),
+            direction_window=float(self.get_parameter('arbiter_direction_window').value),
+            suppress_contained=False)
+        self.arbiter = TargetArbiter(params)
+        self.arbiter_memory = CandidateMemory(float(self.get_parameter('arbiter_memory_s').value),
+                                              contained_ratio=d.contained_ratio)
+        print(f"  [arbitro ombra] parametri: allineamento>={params.min_alignment}, "
+              f"conferma={params.hysteresis_cycles} cicli, finestra={params.direction_window} s, "
+              f"memoria={self.arbiter_memory.max_age} s")
         # Camera -> base con la stessa formula e gli stessi valori di ET_node
         # (arucoPoseCallback: p_base = p_ee + R_ee (t_cam + R_cam p_cam)),
         # non con la TF: in laboratorio nessuno pubblica tool0 ->
@@ -854,15 +878,18 @@ class SGGNode(Node):
             pass   # alla chiusura di rclpy
 
     def _store_pose(self, msg, attr):
+        # La posa arriva a ~470 Hz: si tiene un campione ogni 50 ms e gli
+        # altri si scartano subito, senza lavoro (carico del portatile).
+        now = time.time()
+        if now - self._last_ee_sample < 0.05:
+            return
         with self._pose_lock:
+            self._last_ee_sample = now
             setattr(self, attr, np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z]))
             if attr == '_ee_pos':
                 o = msg.pose.orientation
                 self._ee_quat = np.array([o.x, o.y, o.z, o.w])
-                now = time.time()
-                if now - self._last_ee_sample >= 0.05:   # la posa arriva a centinaia di Hz
-                    self._last_ee_sample = now
-                    self.arbiter.observe_ee(self._ee_pos, now)
+                self.arbiter.observe_ee(self._ee_pos, now)
         # Il disegno assume entrambe le pose in base_link: lo si verifica qui,
         # una volta per topic.
         if attr not in self._pose_frames_logged:
@@ -883,7 +910,7 @@ class SGGNode(Node):
         candidates = []
         for n in scene_graph:
             if (n['count'] < FREQ_THRESHOLD or n.get('confidence', 0.0) < CONFIDENCE_REMOVE_THRESHOLD
-                    or n.get('frames_not_seen', 0) != 0):
+                    or n.get('frames_not_seen', 0) != 0 or n['label'] in self.arbiter_ignore_labels):
                 continue
             pos, bbox = n.get('position'), n.get('bbox')
             if pos is None or bbox is None:
@@ -898,11 +925,18 @@ class SGGNode(Node):
                                'position_base': tuple(float(v) for v in pb)})
 
         known_uids = {n['uid'] for n in scene_graph}
+        now = time.time()
+        # Candidati = visti ora + visti negli ultimi arbiter_memory_s secondi,
+        # con la posizione in base_link di quando erano in vista.
+        seen_uids = {c['uid'] for c in candidates}
+        self.arbiter_memory.update(candidates, now)
+        candidates = self.arbiter_memory.candidates(now, known_uids)
         with self._pose_lock:
-            res = self.arbiter.step(candidates, ee_pos, time.time(), known_uids)
+            res = self.arbiter.step(candidates, ee_pos, now, known_uids)
         posa = "ok"
 
-        names = {c['uid']: f"{c['label']}#{c['uid']}" for c in candidates}
+        names = {c['uid']: f"{c['label']}#{c['uid']}" + ("" if c['uid'] in seen_uids else "(mem)")
+                 for c in candidates}
         names_all = {n['uid']: f"{n['label']}#{n['uid']}" for n in scene_graph}
         cand_txt = ", ".join(names[c['uid']] for c in candidates) or "nessuno"
         score_txt = " ".join(f"{names[u]}={s:.2f}" for u, s in res.scores.items()) or "-"
