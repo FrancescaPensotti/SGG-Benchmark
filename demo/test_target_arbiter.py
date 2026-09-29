@@ -261,6 +261,16 @@ def test_memoria_permette_la_scelta_con_il_rilevatore_intermittente():
     assert res.target_uid == 'A', res
 
 
+def test_memoria_unisce_nodi_doppi_dello_stesso_oggetto():
+    """Come il 29/09: bottle#4 e bottle#5 nello stesso punto."""
+    b4 = cand('b4', (0.30, 0.20, 0.00))
+    b5 = cand('b5', (0.31, 0.21, 0.00))
+    mem = CandidateMemory(max_age=10.0)
+    mem.update([b5], 0.0)
+    mem.update([b4, B], 1.0)
+    assert {c['uid'] for c in mem.candidates(1.0)} == {'b4', 'B'}
+
+
 if __name__ == '__main__':
     tests = [(k, v) for k, v in sorted(globals().items()) if k.startswith('test_') and callable(v)]
     failed = 0

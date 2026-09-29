@@ -134,9 +134,13 @@ class CandidateMemory:
     (es. 'person') non deve cancellare un oggetto vero per tutta la prova.
     """
 
-    def __init__(self, max_age, contained_ratio=None):
+    def __init__(self, max_age, contained_ratio=None, merge_distance=0.05):
         self.max_age = max_age
         self.contained_ratio = contained_ratio
+        # Due nodi del grafo per lo stesso oggetto fisico (29/09: bottle#4 e
+        # bottle#5 nello stesso punto) darebbero punteggi uguali e margine
+        # nullo: sotto questa distanza orizzontale [m] si tiene il piu' recente.
+        self.merge_distance = merge_distance
         self.entries = {}        # uid -> (t, candidato)
 
     def update(self, seen, now):
@@ -153,10 +157,17 @@ class CandidateMemory:
 
     def candidates(self, now, known_uids=None):
         """Candidati visti negli ultimi max_age secondi e ancora nel grafo."""
-        out = []
+        valid = []
         for uid, (t, c) in list(self.entries.items()):
             if now - t > self.max_age or (known_uids is not None and uid not in known_uids):
                 del self.entries[uid]
+                continue
+            valid.append((t, c))
+        out = []
+        for t, c in sorted(valid, key=lambda tc: tc[0], reverse=True):   # piu' recenti prima
+            p = np.asarray(c['position_base'], dtype=float)[:2]
+            if any(np.linalg.norm(p - np.asarray(o['position_base'], dtype=float)[:2]) < self.merge_distance
+                   for o in out):
                 continue
             out.append(c)
         return out
