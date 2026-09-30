@@ -500,6 +500,13 @@ class SGGNode(Node):
         # inseguimento continuo fuori zona di grasp, non voluto).
         self.declare_parameter('auto_select_single_target', False)
         self.auto_select_single_target = self.get_parameter('auto_select_single_target').get_parameter_value().bool_value
+        # Ordine dei canali (30/09/2026): la camera pubblica rgb8 e
+        # imgmsg_to_numpy_bgr8 non scambia i canali, quindi il modello (che si
+        # aspetta BGR) vede rosso e blu invertiti (banana blu). Con true
+        # l'immagine viene girata in BGR vero prima di tutto il resto, per
+        # confrontare il riconoscimento con i colori reali. Default: com'era.
+        self.declare_parameter('true_colors', False)
+        self.true_colors = self.get_parameter('true_colors').get_parameter_value().bool_value
         # Etichette che non sono oggetti da afferrare (29/09/2026): la mano e il
         # corpo di chi prepara la scena entrano nel grafo. Esclusi dalla
         # selezione automatica (Stadio B) e dall'arbitro.
@@ -658,6 +665,8 @@ class SGGNode(Node):
 
     def frame_callback(self, msg):
         frame = imgmsg_to_numpy_bgr8(msg)
+        if self.true_colors:
+            frame = np.ascontiguousarray(frame[:, :, ::-1])
         self.frame_count += 1
 
         if self.frame_count % 5 == 0:
