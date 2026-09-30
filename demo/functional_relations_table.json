@@ -5,9 +5,17 @@
         "reason": "Una banana può essere frullata e il frullato versato in una bottiglia. Oppure, si può bere da una bottiglia mentre si mangia una banana.",
         "score": 0.5
       },
+      "bowl": {
+        "reason": "Una banana, soprattutto se tagliata, viene spesso messa in una ciotola per macedonie, cereali o come spuntino.",
+        "score": 1.0
+      },
       "cup": {
         "reason": "Una banana può essere frullata e il frullato versato in una tazza. Oppure, si può bere da una tazza mentre si mangia una banana.",
         "score": 0.5
+      },
+      "plate": {
+        "reason": "Una banana può essere servita o mangiata su un piatto, specialmente se tagliata.",
+        "score": 1.0
       }
     },
     "bottle": {
@@ -15,8 +23,34 @@
         "reason": "Non c'è un legame d'uso diretto o tipico tra una bottiglia e una banana in un compito quotidiano.",
         "score": 0.0
       },
+      "bowl": {
+        "reason": "Una bottiglia di condimento (es. olio, aceto, salsa) o un ingrediente liquido (es. latte, acqua) viene tipicamente versato in una ciotola per preparare cibi o insalate.",
+        "score": 1.0
+      },
       "cup": {
         "reason": "Si versa il contenuto di una bottiglia in una tazza/bicchiere.",
+        "score": 1.0
+      },
+      "plate": {
+        "reason": "Una bottiglia di condimento (es. olio, aceto) può essere usata per versare su cibo in un piatto, ma non è l'uso più comune per una bottiglia generica.",
+        "score": 0.5
+      }
+    },
+    "bowl": {
+      "banana": {
+        "reason": "Una banana è un alimento che può essere messa o tagliata in una ciotola (es. per colazione o macedonia).",
+        "score": 1.0
+      },
+      "bottle": {
+        "reason": "Una bottiglia può essere usata per versare liquidi (es. latte, acqua) nella ciotola.",
+        "score": 1.0
+      },
+      "cup": {
+        "reason": "Una tazza e una ciotola sono entrambi contenitori; possono essere usate insieme in un pasto o per trasferire piccole quantità.",
+        "score": 0.5
+      },
+      "plate": {
+        "reason": "Piatto e ciotola sono spesso usati insieme per servire un pasto o come parte di un set da tavola.",
         "score": 1.0
       }
     },
@@ -27,6 +61,32 @@
       },
       "bottle": {
         "reason": "Tipicamente si versa il contenuto di una bottiglia in una tazza/bicchiere.",
+        "score": 1.0
+      },
+      "bowl": {
+        "reason": "Entrambi contenitori per cibo/bevande, spesso presenti allo stesso pasto (es. colazione), ma raramente con interazione diretta di versamento.",
+        "score": 0.5
+      },
+      "plate": {
+        "reason": "Spesso usati insieme durante i pasti o per appoggiare la tazza (piattino), ma senza interazione diretta di versamento o riempimento.",
+        "score": 0.5
+      }
+    },
+    "plate": {
+      "banana": {
+        "reason": "Una banana è un alimento che può essere servito o mangiato su un piatto, specialmente se tagliata o come parte di un pasto.",
+        "score": 1.0
+      },
+      "bottle": {
+        "reason": "Una bottiglia (es. di condimento come olio o salsa) può essere usata per versare su cibo nel piatto.",
+        "score": 1.0
+      },
+      "bowl": {
+        "reason": "Piatto e ciotola sono entrambi stoviglie e sono spesso usati insieme durante un pasto (es. ciotola per zuppa, piatto per portata principale) o per apparecchiare.",
+        "score": 1.0
+      },
+      "cup": {
+        "reason": "Piatto e tazza sono stoviglie complementari e sono tipicamente usati insieme durante un pasto o per apparecchiare la tavola.",
         "score": 1.0
       }
     }
