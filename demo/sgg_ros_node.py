@@ -205,6 +205,33 @@ def imgmsg_to_numpy_depth16(msg):
     return np.frombuffer(msg.data, dtype=np.uint16).reshape(msg.height, msg.width)
 
 
+def depth_percentile_in_bbox(depth_frame, bbox, color_shape=None, frac=0.6, pct=30.0, min_count=30):
+    """Profondita' [m] della parte dell'oggetto piu' vicina alla camera
+    (30/09/2026): percentile `pct` delle letture valide nel `frac` centrale
+    del riquadro. Con la camera obliqua il pixel centrale del riquadro cade
+    spesso sul bordo o sul tavolo dietro l'oggetto e la z risulta troppo
+    profonda (19 prese su 21 del 29-30/09 spostate di ~3 cm e piu' profonde
+    del centro di GraspNet). None se le letture valide sono meno di min_count."""
+    if depth_frame is None or bbox is None:
+        return None
+    h, w = depth_frame.shape
+    sx = sy = 1.0
+    if color_shape is not None and (color_shape[0] != h or color_shape[1] != w):
+        sy, sx = h / color_shape[0], w / color_shape[1]
+    x1, y1, x2, y2 = [float(v) for v in bbox]
+    cx, cy = 0.5 * (x1 + x2), 0.5 * (y1 + y2)
+    hw, hh = 0.5 * frac * (x2 - x1), 0.5 * frac * (y2 - y1)
+    xa, xb = int(max(0, (cx - hw) * sx)), int(min(w, (cx + hw) * sx))
+    ya, yb = int(max(0, (cy - hh) * sy)), int(min(h, (cy + hh) * sy))
+    if xb <= xa or yb <= ya:
+        return None
+    patch = depth_frame[ya:yb, xa:xb].astype(np.float32)
+    valid = patch[(patch >= MIN_VALID_DEPTH_M * 1000.0) & (patch <= MAX_VALID_DEPTH_M * 1000.0)]
+    if valid.size < min_count:
+        return None
+    return float(np.percentile(valid, pct)) / 1000.0
+
+
 def read_depth_at_pixel(depth_frame, cx_pixel, cy_pixel, window=DEPTH_WINDOW):
     """Legge la profondita' reale (in metri) mediando una finestra NxN attorno
     al pixel dato — un solo pixel sarebbe troppo rumoroso. Scarta gli zeri
@@ -551,6 +578,13 @@ class SGGNode(Node):
         # lungo il raggio della camera di meta' del lato corto del riquadro
         # (convertito in metri con la depth), al massimo center_max_offset.
         # Solo con depth valida.
+        # Profondita' del target (30/09/2026): 'center' = finestra attorno al
+        # pixel centrale del riquadro (come prima); 'percentile' = parte
+        # dell'oggetto piu' vicina alla camera nel riquadro
+        # (depth_percentile_in_bbox), ricade su 'center' se non ci sono
+        # abbastanza letture. Solo per il target pubblicato a ET_node.
+        self.declare_parameter('target_depth_mode', 'center')
+        self.target_depth_mode = self.get_parameter('target_depth_mode').value
         self.declare_parameter('center_depth_correction', False)
         self.declare_parameter('center_max_offset', 0.04)
         # Meno profondita' (25/09/2026): con il tetto di 4 cm la punta delle
@@ -682,6 +716,7 @@ class SGGNode(Node):
 
     def frame_callback(self, msg):
         frame = imgmsg_to_numpy_bgr8(msg)
+        self.last_frame_shape = frame.shape[:2]
         if self.true_colors:
             frame = np.ascontiguousarray(frame[:, :, ::-1])
         self.frame_count += 1
@@ -1068,6 +1103,11 @@ class SGGNode(Node):
         opzionalmente il suo bbox pixel su /sgg/target_bbox (22/09/2026,
         usato da graspnet_node.py per il crop X/Y lato server)."""
         z, sorgente = self.z_for_pixel(pos_pixel)
+        if self.target_depth_mode == 'percentile' and bbox is not None:
+            color_shape = self.last_frame_shape if hasattr(self, 'last_frame_shape') else None
+            z_p = depth_percentile_in_bbox(self.last_depth_frame, bbox, color_shape)
+            if z_p is not None:
+                z, sorgente = z_p, 'depth p30'
         if z is None:
             self.get_logger().warn("Nessuna profondita' valida (depth non valida, z ArUco assente o vecchia): non pubblico il target.",
                                    throttle_duration_sec=2.0)
