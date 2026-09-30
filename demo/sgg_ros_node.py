@@ -501,11 +501,13 @@ class SGGNode(Node):
         self.declare_parameter('auto_select_single_target', False)
         self.auto_select_single_target = self.get_parameter('auto_select_single_target').get_parameter_value().bool_value
         # Ordine dei canali (30/09/2026): la camera pubblica rgb8 e
-        # imgmsg_to_numpy_bgr8 non scambia i canali, quindi il modello (che si
-        # aspetta BGR) vede rosso e blu invertiti (banana blu). Con true
-        # l'immagine viene girata in BGR vero prima di tutto il resto, per
-        # confrontare il riconoscimento con i colori reali. Default: com'era.
-        self.declare_parameter('true_colors', False)
+        # imgmsg_to_numpy_bgr8 non scambia i canali, quindi senza correzione
+        # il modello (che si aspetta BGR) vede rosso e blu invertiti (banana
+        # blu). Con true l'immagine viene girata in BGR vero prima di tutto il
+        # resto. Default true dal 30/09: con i colori veri il bicchierino e'
+        # riconosciuto in 91 cicli su 91 contro 65 su 155, bottiglia e banana
+        # sempre; smentisce l'impressione del 22/09 (vedi imgmsg_to_numpy_bgr8).
+        self.declare_parameter('true_colors', True)
         self.true_colors = self.get_parameter('true_colors').get_parameter_value().bool_value
         # Etichette che non sono oggetti da afferrare (29/09/2026): la mano e il
         # corpo di chi prepara la scena entrano nel grafo. Esclusi dalla
