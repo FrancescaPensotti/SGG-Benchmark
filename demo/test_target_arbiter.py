@@ -15,7 +15,8 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from target_arbiter import (ArbiterParams, CandidateMemory, MotionDirection,  # noqa: E402
-                            TargetArbiter, alignment_scores, containment, drop_contained)
+                            TargetArbiter, alignment_scores, containment, drop_contained,
+                            pick_nearest_among_aligned)
 
 EE0 = np.array([0.0, 0.0, 0.3])   # posizione iniziale del polso in base_link [m]
 N = ArbiterParams().hysteresis_cycles
@@ -284,6 +285,26 @@ def test_memoria_unisce_nodi_doppi_dello_stesso_oggetto():
     mem.update([b5], 0.0)
     mem.update([b4, B], 1.0)
     assert {c['uid'] for c in mem.candidates(1.0)} == {'b4', 'B'}
+
+
+def test_oggetti_in_fila_vince_il_piu_vicino():
+    """Come il 30/09: bottle, cup, plate in fila lungo la direzione di movimento."""
+    near = cand('N', (0.20, 0.0, 0.0)); far = cand('F', (0.45, 0.02, 0.0))
+    arb = TargetArbiter()
+    res, _, _ = run(arb, [near, far], (0.03, 0.0, 0.0), 2 * N, cycle_dt=3.0)
+    assert res.target_uid == 'N', res
+
+
+def test_oggetti_in_fila_troppo_vicini_fra_loro_restano_ambigui():
+    s = {'A': 0.99, 'B': 0.97}
+    cands = [cand('A', (0.30, 0.0, 0.0)), cand('B', (0.33, 0.0, 0.0))]
+    assert pick_nearest_among_aligned(s, cands, (0, 0, 0.3), 0.6, 0.1, 0.05) is None
+
+
+def test_un_solo_allineato_non_guarda_la_distanza():
+    s = {'A': 0.95, 'B': 0.40}
+    cands = [cand('A', (0.60, 0.0, 0.0)), cand('B', (0.10, 0.0, 0.0))]
+    assert pick_nearest_among_aligned(s, cands, (0, 0, 0.3), 0.6, 0.1, 0.05) == 'A'
 
 
 if __name__ == '__main__':

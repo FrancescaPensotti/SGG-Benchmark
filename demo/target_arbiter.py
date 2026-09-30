@@ -53,6 +53,14 @@ class ArbiterParams:
     # (es. 'cap' del nastro dentro 'bottle').
     suppress_contained: bool = True
     contained_ratio: float = 0.8
+    # A parita' di direzione vince il piu' vicino (30/09/2026): con gli
+    # oggetti in fila lungo la direzione di movimento (vista inclinata)
+    # l'allineamento non li distingue (bottle 1.00, cup 0.98, plate 0.93).
+    # Fra i candidati sopra soglia ed entro min_margin dal migliore si
+    # sceglie il piu' vicino al polso nel piano, se lo e' di almeno
+    # nearest_margin [m] rispetto al successivo.
+    prefer_nearest: bool = True
+    nearest_margin: float = 0.05
 
 
 @dataclass
@@ -104,6 +112,28 @@ def alignment_scores(direction, ee_position, candidates, horizontal_only=False):
         vn = np.linalg.norm(v)
         scores[c['uid']] = float(d.dot(v) / (dn * vn)) if dn > 0.0 and vn > 0.0 else -1.0
     return scores
+
+
+def pick_nearest_among_aligned(scores, candidates, ee_position, min_alignment, min_margin,
+                               nearest_margin, horizontal_only=True):
+    """Come pick_winner, ma se piu' candidati sono allineati quasi allo
+    stesso modo sceglie il piu' vicino al polso (se lo e' di almeno
+    nearest_margin rispetto al secondo piu' vicino). None se ambiguo."""
+    if not scores:
+        return None
+    best = max(scores.values())
+    if best < min_alignment:
+        return None
+    aligned = [u for u, sc in scores.items() if sc >= min_alignment and best - sc < min_margin]
+    if len(aligned) == 1:
+        return aligned[0]
+    mask = np.array([1.0, 1.0, 0.0]) if horizontal_only else np.ones(3)
+    pos = {c['uid']: np.asarray(c['position_base'], dtype=float) for c in candidates}
+    ee = np.asarray(ee_position, dtype=float)
+    dist = sorted((float(np.linalg.norm((pos[u] - ee) * mask)), u) for u in aligned)
+    if dist[1][0] - dist[0][0] >= nearest_margin:
+        return dist[0][1]
+    return None
 
 
 def pick_winner(scores, min_alignment, min_margin):
@@ -268,7 +298,12 @@ class TargetArbiter:
             # Stesso criterio con uno o piu' candidati: l'utente deve andare
             # verso l'oggetto (con uno solo il margine non conta).
             scores = alignment_scores(direction, ee_position, candidates, self.p.horizontal_only)
-            proposal = pick_winner(scores, self.p.min_alignment, self.p.min_margin)
+            if self.p.prefer_nearest:
+                proposal = pick_nearest_among_aligned(scores, candidates, ee_position, self.p.min_alignment,
+                                                      self.p.min_margin, self.p.nearest_margin,
+                                                      self.p.horizontal_only)
+            else:
+                proposal = pick_winner(scores, self.p.min_alignment, self.p.min_margin)
             reason = "allineato" if proposal is not None else "ambiguo"
 
         if forgotten:
