@@ -504,7 +504,7 @@ class SGGNode(Node):
         # corpo di chi prepara la scena entrano nel grafo. Esclusi dalla
         # selezione automatica (Stadio B) e dall'arbitro.
         self.declare_parameter('non_object_labels',
-                               ['person', 'man', 'woman', 'hand', 'arm', 'shirt', 'head', 'face'])
+                               ['person', 'man', 'woman', 'hand', 'finger', 'arm', 'shirt', 'head', 'face'])
         self.non_object_labels = set(self.get_parameter('non_object_labels').value)
         # Riquadri arancioni "(memoria)" nella finestra: spenti di default dal
         # 29/09/2026 (su richiesta, tolgono leggibilita'); gli oggetti restano
