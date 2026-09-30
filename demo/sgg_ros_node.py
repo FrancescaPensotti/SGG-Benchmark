@@ -654,6 +654,21 @@ class SGGNode(Node):
         self.target_bbox_pub = self.create_publisher(Float32MultiArray, '/sgg/target_bbox', 10)
 
         # Timer per visualizzazione (ogni 100ms)
+        # Video della finestra di SGG (30/09/2026): con record_video il nodo
+        # salva le stesse immagini che mostra (riquadri, crop GraspNet,
+        # suggerimento dello Stadio D) in $LAB/video_sgg_<nome>.mp4, a 5
+        # immagini al secondo in tempo reale. Costa poco: l'immagine e' gia'
+        # disegnata, si scrive solo su file.
+        self.declare_parameter('record_video', False)
+        self.declare_parameter('record_video_name', '')
+        self._video_writer = None
+        self._video_last = 0.0
+        if self.get_parameter('record_video').get_parameter_value().bool_value:
+            lab = os.environ.get('LAB') or os.path.expanduser(f"~/lab_logs/{time.strftime('%Y-%m-%d')}")
+            os.makedirs(lab, exist_ok=True)
+            name = self.get_parameter('record_video_name').value or time.strftime('%H-%M-%S')
+            self._video_path = os.path.join(lab, f"video_sgg_{name}.mp4")
+            print(f"  🎥 Registrazione della finestra SGG in {self._video_path}")
         self.create_timer(0.1, self.display_callback)
 
         # Thread separato per i comandi da tastiera
@@ -795,6 +810,24 @@ class SGGNode(Node):
                 self.republish_active_target()   # ripubblica il target attivo, se c'è
                 self.republish_candidate_targets()   # candidati multipli, solo se nessun comando esplicito attivo
 
+    def _record_frame(self, img):
+        if not hasattr(self, '_video_path'):
+            return
+        now = time.time()
+        if now - self._video_last < 0.2:      # 5 immagini al secondo
+            return
+        self._video_last = now
+        if self._video_writer is None:
+            h, w = img.shape[:2]
+            self._video_writer = cv2.VideoWriter(self._video_path, cv2.VideoWriter_fourcc(*'mp4v'), 5.0, (w, h))
+        self._video_writer.write(img)
+
+    def close_video(self):
+        if self._video_writer is not None:
+            self._video_writer.release()
+            self._video_writer = None
+            print(f"  🎥 Video salvato: {self._video_path}")
+
     def display_callback(self):
         with self.lock:
             if self.img is not None:
@@ -853,6 +886,7 @@ class SGGNode(Node):
                 # "memoria" e quelli di debug del target non comparivano mai.
                 cv2.imshow("SGG ROS2 Node", display_img)
                 cv2.waitKey(1)
+                self._record_frame(display_img)
     
     # ── Arbitro del target, modalita' ombra ────────────────────
     def _setup_arbiter(self):
@@ -1479,6 +1513,7 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        node.close_video()
         cv2.destroyAllWindows()
         node.destroy_node()
         print_scene_graph()
