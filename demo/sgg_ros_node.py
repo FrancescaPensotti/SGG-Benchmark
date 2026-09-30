@@ -851,11 +851,17 @@ class SGGNode(Node):
         now = time.time()
         if now - self._video_last < 0.2:      # 5 immagini al secondo
             return
-        self._video_last = now
         if self._video_writer is None:
             h, w = img.shape[:2]
             self._video_writer = cv2.VideoWriter(self._video_path, cv2.VideoWriter_fourcc(*'mp4v'), 5.0, (w, h))
-        self._video_writer.write(img)
+            self._video_last = now - 0.2
+        # La finestra si aggiorna solo fra un frame elaborato e l'altro (2-5 s
+        # con tutto acceso): l'immagine si ripete per il tempo trascorso, cosi'
+        # il video resta in tempo reale (30/09: 10 minuti diventavano 25 s).
+        n = max(1, min(150, int(round((now - self._video_last) / 0.2))))
+        for _ in range(n):
+            self._video_writer.write(img)
+        self._video_last = now
 
     def close_video(self):
         if self._video_writer is not None:
