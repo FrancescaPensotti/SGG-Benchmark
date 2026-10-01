@@ -1057,7 +1057,7 @@ class SGGNode(Node):
         candidates = self.arbiter_memory.candidates(now)
         memory_uids = set(self.arbiter_memory.entries)
         with self._pose_lock:
-            res = self.arbiter.step(candidates, ee_pos, now, known_uids | memory_uids)
+            res = self.arbiter.step(candidates, ee_pos, now, known_uids | memory_uids, ee_rotation=R_ee)
         posa = "ok"
 
         names = {c['uid']: f"{c['label']}#{c['uid']}" + ("" if c['uid'] in seen_uids else "(mem)")

@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from target_arbiter import (ArbiterParams, CandidateMemory, MotionDirection,  # noqa: E402
                             TargetArbiter, alignment_scores, containment, drop_contained,
-                            pick_nearest_among_aligned)
+                            pick_by_descent, pick_nearest_among_aligned)
 
 EE0 = np.array([0.0, 0.0, 0.3])   # posizione iniziale del polso in base_link [m]
 N = ArbiterParams().hysteresis_cycles
@@ -305,6 +305,36 @@ def test_un_solo_allineato_non_guarda_la_distanza():
     s = {'A': 0.95, 'B': 0.40}
     cands = [cand('A', (0.60, 0.0, 0.0)), cand('B', (0.10, 0.0, 0.0))]
     assert pick_nearest_among_aligned(s, cands, (0, 0, 0.3), 0.6, 0.1, 0.05) == 'A'
+
+
+def test_discesa_sopra_un_oggetto_lo_sceglie_anche_in_fila():
+    """Polso fermo in orizzontale sopra A (punto di avvicinamento 0.184 m sopra),
+    che scende: sceglie A anche se B e' nella stessa direzione."""
+    a = cand('A', (0.30, 0.0, 0.0)); b = cand('B', (0.55, 0.0, 0.0))
+    arb = TargetArbiter()
+    start = np.array([0.30, 0.0, 0.40])
+    res, _, _ = run(arb, [a, b], (0.0, 0.0, -0.01), 2 * N, start=start, cycle_dt=3.0)
+    assert res.target_uid == 'A' and res.reason in ("discesa", "scelta bloccata"), res
+
+
+def test_discesa_fra_due_oggetti_non_sceglie():
+    s = pick_by_descent([cand('A', (0.30, 0.0, 0.0)), cand('B', (0.33, 0.0, 0.0))],
+                        (0.315, 0.0, 0.3), None, 0.184, 0.10, 0.05)
+    assert s is None
+
+
+def test_discesa_lontano_dagli_oggetti_non_sceglie():
+    s = pick_by_descent([cand('A', (0.30, 0.0, 0.0))], (0.0, 0.0, 0.3), None, 0.184, 0.10, 0.05)
+    assert s is None
+
+
+def test_discesa_con_pinza_inclinata_usa_il_punto_di_avvicinamento():
+    # pinza inclinata di 30 gradi attorno a y: il punto di avvicinamento e' spostato in x
+    th = np.radians(30.0)
+    R = np.array([[np.cos(th), 0, np.sin(th)], [0, 1, 0], [-np.sin(th), 0, np.cos(th)]])
+    obj = np.array([0.30, 0.0, 0.0]); approach = obj - R @ np.array([0, 0, 0.184])
+    s = pick_by_descent([cand('A', tuple(obj))], tuple(approach + [0, 0, 0.05]), R, 0.184, 0.10, 0.05)
+    assert s == 'A'
 
 
 if __name__ == '__main__':

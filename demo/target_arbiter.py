@@ -61,6 +61,17 @@ class ArbiterParams:
     # nearest_margin [m] rispetto al successivo.
     prefer_nearest: bool = True
     nearest_margin: float = 0.05
+    # Discesa (01/10/2026): chi vuole prendere un oggetto si mette sopra il
+    # suo punto di avvicinamento e scende. Se il polso e' sceso di almeno
+    # descent_min [m] nella finestra e un solo oggetto ha il punto di
+    # avvicinamento (posizione - R_pinza * [0, 0, gripper_offset]) entro
+    # descent_radius in orizzontale dal polso (il piu' vicino, staccato di
+    # nearest_margin dal secondo), la proposta e' quell'oggetto. Con gli
+    # oggetti in fila la sola direzione orizzontale non basta (30/09).
+    use_descent: bool = True
+    descent_min: float = 0.02
+    descent_radius: float = 0.10
+    gripper_offset: float = 0.184
 
 
 @dataclass
@@ -134,6 +145,24 @@ def pick_nearest_among_aligned(scores, candidates, ee_position, min_alignment, m
     if dist[1][0] - dist[0][0] >= nearest_margin:
         return dist[0][1]
     return None
+
+
+def pick_by_descent(candidates, ee_position, ee_rotation, gripper_offset, radius, nearest_margin):
+    """uid dell'unico oggetto il cui punto di avvicinamento e' entro radius
+    in orizzontale dal polso (con stacco nearest_margin dal secondo), o None."""
+    ee = np.asarray(ee_position, dtype=float)
+    R = np.eye(3) if ee_rotation is None else np.asarray(ee_rotation, dtype=float)
+    off = R @ np.array([0.0, 0.0, gripper_offset])
+    dist = []
+    for c in candidates:
+        approach = np.asarray(c['position_base'], dtype=float) - off
+        dist.append((float(np.linalg.norm((approach - ee)[:2])), c['uid']))
+    dist.sort()
+    if not dist or dist[0][0] > radius:
+        return None
+    if len(dist) > 1 and dist[1][0] - dist[0][0] < nearest_margin:
+        return None
+    return dist[0][1]
 
 
 def pick_winner(scores, min_alignment, min_margin):
@@ -258,7 +287,7 @@ class TargetArbiter:
         """Posizione del polso in base_link; da chiamare spesso (es. ogni 50 ms)."""
         self.motion.observe(position, t)
 
-    def step(self, candidates, ee_position, now, known_uids=None):
+    def step(self, candidates, ee_position, now, known_uids=None, ee_rotation=None):
         """
         candidates: lista di dict con 'uid', 'label', 'bbox' (x1,y1,x2,y2 pixel)
             e 'position_base' (3 valori, base_link) -- solo oggetti visti ora.
@@ -267,6 +296,8 @@ class TargetArbiter:
             se la scelta non e' fra questi, si sblocca.
         """
         direction = self.motion.direction(now)
+        descending = (direction is not None and self.p.use_descent
+                      and -float(direction[2]) >= self.p.descent_min)
         if direction is not None and self.p.horizontal_only:
             direction = direction * np.array([1.0, 1.0, 0.0])
         dnorm = float(np.linalg.norm(direction)) if direction is not None else 0.0
@@ -290,8 +321,14 @@ class TargetArbiter:
             candidates = drop_contained(candidates, self.p.contained_ratio)
 
         scores = {}
+        descent_pick = None
+        if candidates and descending:
+            descent_pick = pick_by_descent(candidates, ee_position, ee_rotation, self.p.gripper_offset,
+                                           self.p.descent_radius, self.p.nearest_margin)
         if not candidates:
             proposal, reason = None, "nessun candidato"
+        elif descent_pick is not None:
+            proposal, reason = descent_pick, "discesa"
         elif dnorm < self.p.min_direction_norm:
             proposal, reason = None, "utente fermo"
         else:
