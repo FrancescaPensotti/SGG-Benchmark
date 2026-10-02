@@ -104,11 +104,10 @@ class GraspNetNode(Node):
         self.declare_parameter('target_bbox_topic', '/sgg/target_bbox')
         self.declare_parameter('bbox_margin_m', BBOX_MARGIN_M)
         self.bbox_margin_m = self.get_parameter('bbox_margin_m').get_parameter_value().double_value
-        # Apertura massima utilizzabile: la Hand-E apre al massimo 5 cm, con
-        # 5 mm di margine per l'errore di stima della larghezza. Valore
-        # fisico reale -- riportato qui a fine sessione del 21/09/2026 dopo
-        # gli alzamenti temporanei a 0.10 per i test diagnostici di oggi.
-        self.declare_parameter('max_grasp_width', 0.045)
+        # Apertura massima utilizzabile: con le dita montate il 23/09/2026 la
+        # Hand-E apre 7.5 cm tra le dita (misura interna). Prima, con le dita
+        # vecchie, 5 cm con 5 mm di margine (0.045). Default dal 02/10.
+        self.declare_parameter('max_grasp_width', 0.075)
         self.max_grasp_width = self.get_parameter('max_grasp_width').get_parameter_value().double_value
 
         # Soglia minima di punteggio GraspNet: tra le prese sopra questa
@@ -116,8 +115,9 @@ class GraspNetNode(Node):
         # alla sua posa attuale (vedi select_grasp/_best_equivalent_rotation),
         # non piu' semplicemente la migliore per punteggio. Aggiunto il
         # 21/09/2026 su proposta del tutor: evita di scegliere una presa di
-        # qualita' scarsa solo perche' richiede poca rotazione.
-        self.declare_parameter('min_grasp_score', 0.5)
+        # qualita' scarsa solo perche' richiede poca rotazione. 0.4 nelle prove
+        # dal 24/09, default dal 02/10.
+        self.declare_parameter('min_grasp_score', 0.4)
         self.min_grasp_score = self.get_parameter('min_grasp_score').get_parameter_value().double_value
 
         # Costanti fisse di calibrazione, stesse usate in ET_node.cpp

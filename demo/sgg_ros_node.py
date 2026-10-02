@@ -617,8 +617,9 @@ class SGGNode(Node):
         # media congelata da ET_node era fatta di 5 letture con la stessa z
         # per 12 s mentre il braccio scendeva). 0 = controllo spento, come
         # prima. Dal 26/09 ET_node non ha piu' bisogno dei messaggi per restare
-        # nella zona di grasp, quindi non pubblicare non la interrompe.
-        self.declare_parameter('aruco_z_max_age', 0.0)
+        # nella zona di grasp, quindi non pubblicare non la interrompe. 5 s
+        # nelle prove dal 29/09, default dal 02/10.
+        self.declare_parameter('aruco_z_max_age', 5.0)
         self.aruco_z_max_age = self.get_parameter('aruco_z_max_age').get_parameter_value().double_value
         self._last_stale_z_print = 0.0
         self.center_depth_margin = self.get_parameter('center_depth_margin').get_parameter_value().double_value
