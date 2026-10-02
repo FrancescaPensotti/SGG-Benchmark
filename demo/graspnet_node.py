@@ -126,7 +126,10 @@ class GraspNetNode(Node):
         # candidata (vedi _best_equivalent_rotation): non rifanno la
         # trasformazione finale in base_link, che resta interamente in
         # ET_node (unica fonte di verita' per quella catena).
-        self.declare_parameter('camera_to_tool0_quat', [0.0418853, 0.0106185, 0.0165691, 0.998929])
+        # Calibrazione di config/ur_camera_config.yaml di Energy-Tanks, la stessa
+        # che usa ET_node (02/10/2026: prima qui c'era la calibrazione
+        # precedente, circa 5 gradi diversa).
+        self.declare_parameter('camera_to_tool0_quat', [-0.00163112, 0.00508842, 0.00484543, 0.999974])
         self.declare_parameter('grasp_frame_to_tool0_quat', [0.5, 0.5, 0.5, 0.5])
         self._camera_to_tool0 = Rotation.from_quat(self.get_parameter('camera_to_tool0_quat').value)
         self._grasp_frame_to_tool0 = Rotation.from_quat(self.get_parameter('grasp_frame_to_tool0_quat').value)
