@@ -591,12 +591,6 @@ class SGGNode(Node):
         # dell'LLM su disco (demo/functional_relations.py).
         self.declare_parameter('next_object_mode', 'off')
         self.declare_parameter('next_object_min_score', 0.5)
-        # Correzione verso il centro dell'oggetto (25/09/2026): la depth al
-        # centro del riquadro e' quella della superficie verso la camera, e le
-        # prese risultavano "superficiali". Con true il punto viene spostato
-        # lungo il raggio della camera di meta' del lato corto del riquadro
-        # (convertito in metri con la depth), al massimo center_max_offset.
-        # Solo con depth valida.
         # Profondita' del target (30/09/2026): 'center' = finestra attorno al
         # pixel centrale del riquadro (come prima); 'percentile' = parte
         # dell'oggetto piu' vicina alla camera nel riquadro
@@ -604,11 +598,10 @@ class SGGNode(Node):
         # abbastanza letture. Solo per il target pubblicato a ET_node.
         self.declare_parameter('target_depth_mode', 'center')
         self.target_depth_mode = self.get_parameter('target_depth_mode').value
-        self.declare_parameter('center_depth_correction', False)
-        self.declare_parameter('center_max_offset', 0.04)
-        # Meno profondita' (25/09/2026): con il tetto di 4 cm la punta delle
-        # dita toccava il tavolo; all'offset si tolgono center_depth_margin m.
-        self.declare_parameter('center_depth_margin', 0.02)
+        # La correzione verso il centro dell'oggetto (center_depth_correction,
+        # 25/09/2026: punto spostato lungo il raggio della camera) e' stata
+        # tolta il 02/10: spingeva il punto sotto il tavolo con gli oggetti
+        # curvi e dal 29/09 era spenta.
         # Eta' massima [s] della z di riserva (piano ArUco o ultima depth del
         # target), usata quando la depth nel pixel non e' valida (27/09/2026).
         # Oltre questa eta' non si calcola la posizione e il target non viene
@@ -622,9 +615,6 @@ class SGGNode(Node):
         self.declare_parameter('aruco_z_max_age', 5.0)
         self.aruco_z_max_age = self.get_parameter('aruco_z_max_age').get_parameter_value().double_value
         self._last_stale_z_print = 0.0
-        self.center_depth_margin = self.get_parameter('center_depth_margin').get_parameter_value().double_value
-        self.center_depth_correction = self.get_parameter('center_depth_correction').get_parameter_value().bool_value
-        self.center_max_offset = self.get_parameter('center_max_offset').get_parameter_value().double_value
         self.next_object_mode = self.get_parameter('next_object_mode').get_parameter_value().string_value
         self.next_object_min_score = self.get_parameter('next_object_min_score').get_parameter_value().double_value
         if self.next_object_mode not in ('off', 'spaziale', 'semantica'):
@@ -1150,12 +1140,6 @@ class SGGNode(Node):
             return
         pm = pixel_to_meters_3d(pos_pixel[0], pos_pixel[1], z, CAMERA_MATRIX)
         p = np.array([pm[0], pm[1], z], dtype=float)
-        offset_txt = ""
-        if self.center_depth_correction and sorgente == 'depth' and bbox is not None:
-            lato_px = min(bbox[2] - bbox[0], bbox[3] - bbox[1])
-            r = max(0.0, min(0.5 * lato_px * z / CAMERA_MATRIX[0, 0], self.center_max_offset) - self.center_depth_margin)
-            p = p * (np.linalg.norm(p) + r) / np.linalg.norm(p)   # avanti di r lungo il raggio
-            offset_txt = f", +{r*100:.1f} cm verso il centro"
         msg = PointStamped()
         msg.header.frame_id = "camera_color_optical_frame"
         msg.header.stamp = self.get_clock().now().to_msg()
@@ -1173,7 +1157,7 @@ class SGGNode(Node):
         # per poter allineare a occhio quando serve, aggiunto il 21/09/2026.
         if now - self._last_target_print >= self._print_throttle_s:
             self._last_target_print = now
-            print(f"  → [{now:.3f}] Target pubblicato su /sgg/target_point: ({p[0]:.3f}, {p[1]:.3f}, {p[2]:.3f}) [frame camera, z da {sorgente}{offset_txt}]")
+            print(f"  → [{now:.3f}] Target pubblicato su /sgg/target_point: ({p[0]:.3f}, {p[1]:.3f}, {p[2]:.3f}) [frame camera, z da {sorgente}]")
 
     def gripper_status_callback(self, msg: Bool):
         """Ogni messaggio su questo topic è già un grasp confermato (ET_node ha
