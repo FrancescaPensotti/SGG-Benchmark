@@ -5,8 +5,8 @@ scena, non alle relazioni spaziali predette da SGG.
 
 Motivo (Metodologia, 24/09): con gli oggetti a ~20 cm l'uno dall'altro SGG
 predice quasi solo 'near', che non e' mappato come funzionale, quindi la
-regola spaziale (VG_TO_FUNCTIONAL in sgg_ros_node.py) non suggerirebbe quasi
-mai niente; e "bottiglia e bicchiere vanno insieme" non dipende da dove sono.
+regola spaziale (modalita' 'spaziale' con VG_TO_FUNCTIONAL, tolta il
+02/10/2026) non suggeriva quasi mai niente; e "bottiglia e bicchiere vanno insieme" non dipende da dove sono.
 
 Le valutazioni (punteggio 0-1 + motivazione per ogni coppia ordinata
 afferrato -> candidato) vengono da un LLM e si salvano in una tabella JSON su

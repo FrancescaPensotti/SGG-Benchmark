@@ -585,10 +585,12 @@ class SGGNode(Node):
             self._setup_arbiter()
 
         # Stadio D, suggerimento del prossimo oggetto dopo un grasp (24/09/2026).
-        # 'off' (default): dopo il grasp nessun nuovo target. 'spaziale': regola
-        # precedente, dalle relazioni SGG tradotte con VG_TO_FUNCTIONAL.
-        # 'semantica': dai nomi degli oggetti in scena, con la tabella
-        # dell'LLM su disco (demo/functional_relations.py).
+        # 'off' (default): dopo il grasp nessun nuovo target. 'semantica': dai
+        # nomi degli oggetti in scena, con la tabella dell'LLM su disco
+        # (demo/functional_relations.py). La modalita' 'spaziale' (relazioni
+        # SGG tradotte con VG_TO_FUNCTIONAL, con il giudice LLM in sola
+        # modalita' log) e' stata tolta il 02/10: con gli oggetti distanziati
+        # SGG predice quasi solo 'near' e non suggeriva quasi mai niente.
         self.declare_parameter('next_object_mode', 'off')
         self.declare_parameter('next_object_min_score', 0.5)
         # Profondita' del target (30/09/2026): 'center' = finestra attorno al
@@ -617,9 +619,9 @@ class SGGNode(Node):
         self._last_stale_z_print = 0.0
         self.next_object_mode = self.get_parameter('next_object_mode').get_parameter_value().string_value
         self.next_object_min_score = self.get_parameter('next_object_min_score').get_parameter_value().double_value
-        if self.next_object_mode not in ('off', 'spaziale', 'semantica'):
+        if self.next_object_mode not in ('off', 'semantica'):
             self.get_logger().warn(
-                f"next_object_mode='{self.next_object_mode}' non supportato (off/spaziale/semantica): spento.")
+                f"next_object_mode='{self.next_object_mode}' non supportato (off/semantica): spento.")
             self.next_object_mode = 'off'
         self.functional_table = None
         if self.next_object_mode == 'semantica':
@@ -1172,15 +1174,12 @@ class SGGNode(Node):
 
     def advance_to_next_object(self, grasped_label):
         """Dopo un grasp confermato sceglie il prossimo target secondo
-        next_object_mode (off / spaziale / semantica)."""
+        next_object_mode (off / semantica)."""
         if self.next_object_mode == 'off':
             print(f"  → Grasp di '{grasped_label}' rilevato. Stadio D spento: nessun prossimo target.")
             self.active_target_label = None
             return
-        if self.next_object_mode == 'semantica':
-            self.advance_to_next_object_semantic(grasped_label)
-        else:
-            self.advance_to_next_object_spatial(grasped_label)
+        self.advance_to_next_object_semantic(grasped_label)
         # Il suggerimento non si pubblica subito: con la pinza ancora chiusa
         # sull'oggetto appena preso, avvicinarsi al successivo farebbe
         # ripartire rotazione GraspNet e chiusura. Resta in attesa fino a
@@ -1280,54 +1279,6 @@ class SGGNode(Node):
         self.active_target_label = label
         print(f"  → Grasp di '{grasped_label}' rilevato. Prossimo target suggerito: '{label}' "
               f"(punteggio {score:.2f}: {reason})")
-
-    def advance_to_next_object_spatial(self, grasped_label):
-        """Cerca tra le relazioni del nodo appena graspato quella funzionale
-        con conteggio più alto, e la imposta come nuovo target attivo."""
-        grasped_node = next((n for n in scene_graph if n['label'] == grasped_label), None)
-
-        if grasped_node is None:
-            print(f"  ⚠️ '{grasped_label}' non più nel grafo, nessun proseguimento automatico.")
-            self.active_target_label = None
-            return
-
-        best_rel, best_count = None, 0
-        for (pred, obj_uid), count in grasped_node['relazioni'].items():
-            if pred in VG_TO_FUNCTIONAL and count > best_count and node_by_uid(scene_graph, obj_uid) is not None:
-                best_rel, best_count = (pred, obj_uid), count
-
-        if best_rel is None:
-            print(f"  ℹ️ Nessuna relazione funzionale per '{grasped_label}': nessun successivo.")
-            self.active_target_label = None
-            return
-
-        pred, obj_uid = best_rel
-        candidate_label = node_by_uid(scene_graph, obj_uid)['label']
-
-        # Giudice in sola modalita' log: un suo errore (chiave mancante, rete)
-        # non deve fermare il nodo.
-        try:
-            from demo.gemini_retrieval import judge_functional_relation
-            verdict = judge_functional_relation(grasped_label, pred, candidate_label)
-        except Exception as exc:
-            print(f"  🤖 Giudice LLM non disponibile ({exc}).")
-            verdict = None
-        # TODO: modalità SOLO LOG per validare il giudice prima di fidarsene --
-        # non cambia ancora il comportamento (active_target_label si imposta
-        # comunque come oggi, indipendentemente dal verdetto). Prossimo passo,
-        # dopo verifica in lab: se verdict['plausible'] è False, scartare
-        # questo candidato e riprovare col prossimo per count invece di
-        # fermarsi; se Gemini non risponde (verdict is None), comportamento
-        # invariato (nessun veto, si va avanti come oggi).
-        if verdict is not None:
-            esito = "APPROVATO" if verdict['plausible'] else "BOCCIATO"
-            print(f"  🤖 Giudice LLM: {esito} (score={verdict['score']:.2f}) — {verdict['reason']}")
-        else:
-            print("  🤖 Giudice LLM non raggiungibile, nessun veto (solo log per ora).")
-
-        self.active_target_label = candidate_label
-        print(f"  → Grasp di '{grasped_label}' rilevato. Prossimo target: '{self.active_target_label}' ({pred}, {best_count}x)")
-
 
     def republish_active_target(self):
         """Ripubblica automaticamente la posizione del target attivo (selezionato con
