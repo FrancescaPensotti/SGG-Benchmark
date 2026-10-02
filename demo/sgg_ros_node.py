@@ -489,6 +489,19 @@ def _drop_contained_nodes(nodes, ratio=0.8):
 
 
 class SGGNode(Node):
+    # Target attivo (01/10/2026): l'arbitro attivo lo fissa per uid del nodo,
+    # cosi' con due oggetti con lo stesso nome si ripubblica quello scelto.
+    # Ogni altra assegnazione dell'etichetta (t, g, Stadio B, Stadio D, x)
+    # passa dal setter e azzera l'uid: vale di nuovo la ricerca per nome.
+    @property
+    def active_target_label(self):
+        return self._active_target_label
+
+    @active_target_label.setter
+    def active_target_label(self, value):
+        self._active_target_label = value
+        self.active_target_uid = None
+
     def __init__(self):
         super().__init__('sgg_node')
         self.frame_count = 0
@@ -558,11 +571,17 @@ class SGGNode(Node):
         self.declare_parameter('arbiter_mode', 'off')
         self.arbiter_mode = self.get_parameter('arbiter_mode').get_parameter_value().string_value
         self.arbiter = None
-        if self.arbiter_mode not in ('off', 'ombra'):
+        # 'attivo' (01/10/2026): come 'ombra', ma la scelta dell'arbitro diventa
+        # il target attivo, come dopo un `t` (solo se non c'e' gia' un target,
+        # un suggerimento dello Stadio D in attesa, un oggetto in mano, e se la
+        # zona di grasp e' disponibile). La scelta da sola non muove il robot:
+        # fuori dalla zona il riferimento e' il Falcon; il movimento autonomo
+        # parte solo scendendo sotto la soglia di ingresso.
+        if self.arbiter_mode not in ('off', 'ombra', 'attivo'):
             self.get_logger().warn(
-                f"arbiter_mode='{self.arbiter_mode}' non supportato (solo 'off' o 'ombra'): arbitro spento.")
+                f"arbiter_mode='{self.arbiter_mode}' non supportato (solo 'off', 'ombra' o 'attivo'): arbitro spento.")
             self.arbiter_mode = 'off'
-        if self.arbiter_mode == 'ombra':
+        if self.arbiter_mode in ('ombra', 'attivo'):
             self._setup_arbiter()
 
         # Stadio D, suggerimento del prossimo oggetto dopo un grasp (24/09/2026).
@@ -951,7 +970,7 @@ class SGGNode(Node):
         self.arbiter = TargetArbiter(params)
         self.arbiter_memory = CandidateMemory(float(self.get_parameter('arbiter_memory_s').value),
                                               contained_ratio=d.contained_ratio)
-        print(f"  [arbitro ombra] parametri: allineamento>={params.min_alignment}, "
+        print(f"  [arbitro {self.arbiter_mode}] parametri: allineamento>={params.min_alignment}, "
               f"conferma={params.hysteresis_cycles} cicli, finestra={params.direction_window} s, "
               f"memoria={self.arbiter_memory.max_age} s")
         # Camera -> base con la stessa formula e gli stessi valori di ET_node
@@ -988,7 +1007,8 @@ class SGGNode(Node):
         self._pose_executor = rclpy.executors.SingleThreadedExecutor()
         self._pose_executor.add_node(self._pose_node)
         threading.Thread(target=self._spin_pose, daemon=True).start()
-        self.get_logger().info("Arbitro in modalita' OMBRA: calcola e scrive nel log, non pubblica nulla.")
+        self.get_logger().info("Arbitro in modalita' OMBRA: calcola e scrive nel log, non pubblica nulla." if self.arbiter_mode == 'ombra'
+                               else "Arbitro in modalita' ATTIVA: la scelta diventa il target attivo.")
 
     def _spin_pose(self):
         try:
@@ -1013,7 +1033,7 @@ class SGGNode(Node):
         # una volta per topic.
         if attr not in self._pose_frames_logged:
             self._pose_frames_logged.add(attr)
-            print(f"  [arbitro ombra] {attr}: frame_id='{msg.header.frame_id}'")
+            print(f"  [arbitro {self.arbiter_mode}] {attr}: frame_id='{msg.header.frame_id}'")
 
     def _arbiter_shadow_step(self):
         """Un ciclo dell'arbitro sugli oggetti visti ora: solo log."""
@@ -1073,12 +1093,21 @@ class SGGNode(Node):
             f"candidati: {cand_txt} | punteggi: {score_txt} | dir={res.direction_norm:.3f} m ({posa}) | "
             f"proposta: {prop_txt} | scelta: {scelta_txt} ({res.reason}) | "
             f"target esplicito: {self.active_target_label or 'nessuno'}")
+        # Arbitro attivo: la scelta diventa il target, come dopo un `t`.
+        if (self.arbiter_mode == 'attivo' and res.target_uid is not None
+                and self.active_target_label is None and self.suggested_label is None
+                and not self._holding_object and self.zone_ready):
+            chosen = next((n for n in scene_graph if n['uid'] == res.target_uid), None)
+            if chosen is not None:
+                self.active_target_label = chosen['label']
+                self.active_target_uid = res.target_uid
+                print(f"  🎯 Arbitro: target impostato su '{chosen['label']}#{res.target_uid}' ({res.reason}).")
 
     def _arbiter_print(self, text):
         now = time.time()
         if now - self._last_arbiter_print >= self._print_throttle_s:
             self._last_arbiter_print = now
-            print(f"  [arbitro ombra] [{now:.3f}] {text}")
+            print(f"  [arbitro {self.arbiter_mode}] [{now:.3f}] {text}")
 
     def z_for_pixel(self, pos_pixel, quiet=False):
         """Profondita' dell'oggetto in quel pixel: depth reale della RealSense
@@ -1324,6 +1353,14 @@ class SGGNode(Node):
         if self.active_target_label is None:
             return
 
+        if self.active_target_uid is not None:
+            node = next((n for n in scene_graph if n['uid'] == self.active_target_uid), None)
+            if node is not None:
+                if node.get('confidence', 0.0) >= CONFIDENCE_REMOVE_THRESHOLD and node.get('position'):
+                    self.pubblica_target(node['position'], bbox=node.get('bbox'))
+                return
+            # Nodo scelto non piu' nel grafo: si ricade sulla ricerca per nome.
+
         for node in scene_graph:
             if node['label'] == self.active_target_label and node['count'] >= FREQ_THRESHOLD:
                 if node.get('confidence', 0.0) >= CONFIDENCE_REMOVE_THRESHOLD:
@@ -1490,7 +1527,7 @@ class SGGNode(Node):
                         # che fa avanzare l'arbitro: stesso lock del grafo.
                         with self.lock:
                             self.arbiter.reset()
-                        print("  [arbitro ombra] scelta azzerata.")
+                        print(f"  [arbitro {self.arbiter_mode}] scelta azzerata.")
                     if self.suggested_label is not None:
                         print(f"  → Annullato il suggerimento: '{self.suggested_label}'")
                         self.suggested_label = None
