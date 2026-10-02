@@ -96,6 +96,9 @@ class GraspNetNode(Node):
 
         self.declare_parameter('trigger_topic', '/graspnet/trigger')
         self.declare_parameter('orientation_topic', '/graspnet/grasp_orientation')
+        # Centro della presa scelta (02/10/2026), per l'aiuto di GraspNet sulla
+        # posizione in ET_node (graspnet_position_assist).
+        self.declare_parameter('grasp_center_topic', '/graspnet/grasp_center')
         self.declare_parameter('candidate_targets_topic', '/sgg/candidate_targets')
         self.declare_parameter('target_point_topic', '/sgg/target_point')
         self.declare_parameter('target_bbox_topic', '/sgg/target_bbox')
@@ -132,6 +135,8 @@ class GraspNetNode(Node):
         orientation_topic = self.get_parameter('orientation_topic').get_parameter_value().string_value
 
         self.pub = self.create_publisher(QuaternionStamped, orientation_topic, 10)
+        self.center_pub = self.create_publisher(
+            PointStamped, self.get_parameter('grasp_center_topic').get_parameter_value().string_value, 10)
         # Coda di 1: la chiamata al server blocca il thread, e i trigger
         # accumulati nel frattempo produrrebbero risposte su frame vecchi.
         self.sub = self.create_subscription(
@@ -458,6 +463,13 @@ class GraspNetNode(Node):
         orientation_msg.quaternion.z = float(quat[2])
         orientation_msg.quaternion.w = float(quat[3])
 
+        # Prima il centro, poi l'orientamento: ET_node usa il centro solo
+        # prima di pianificare l'avvicinamento, che parte a rotazione finita.
+        center_msg = PointStamped()
+        center_msg.header = orientation_msg.header
+        t = np.array(grasp['translation'], dtype=float)
+        center_msg.point.x, center_msg.point.y, center_msg.point.z = float(t[0]), float(t[1]), float(t[2])
+        self.center_pub.publish(center_msg)
         self.pub.publish(orientation_msg)
         # Stampa diagnostica dell'orientamento proposto: quaternione grezzo
         # (camera frame, stesso pubblicato su /graspnet/grasp_orientation) +
