@@ -560,6 +560,12 @@ class SGGNode(Node):
         # comunque in memoria nel grafo.
         self.declare_parameter('show_memory_boxes', False)
         self.show_memory_boxes = self.get_parameter('show_memory_boxes').get_parameter_value().bool_value
+        # Identificatore del nodo nella finestra (03/10/2026, solo disegno): con
+        # true accanto a ogni oggetto rilevato nel ciclo corrente compare
+        # "#uid" del nodo a cui e' stato associato, per mostrare (video, figura
+        # della tesi) che lo stesso oggetto resta lo stesso nodo fra due cicli.
+        self.declare_parameter('show_node_ids', False)
+        self.show_node_ids = self.get_parameter('show_node_ids').get_parameter_value().bool_value
         self._auto_select_last_label = None
         self._auto_select_streak = 0
 
@@ -901,6 +907,15 @@ class SGGNode(Node):
                             cv2.rectangle(display_img, (x1, y1), (x2, y2), (0, 165, 255), 2)
                             cv2.putText(display_img, f"{node['label']} (memoria)", (x1, max(y1 - 10, 0)),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 2)
+
+                for node in (scene_graph if self.show_node_ids else []):
+                    if node.get('frames_not_seen', 0) == 0 and node.get('bbox'):
+                        x1, y1, x2, y2 = node['bbox']
+                        text = f"#{node['uid']}"
+                        (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+                        cv2.rectangle(display_img, (x1 + 2, y2 - th - 8), (x1 + tw + 8, y2 - 2), (0, 0, 0), -1)
+                        cv2.putText(display_img, text, (x1 + 5, y2 - 6),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
                 # Debug (22/09/2026): disegna il bbox del target attivo e il
                 # crop con margine che riceverebbe grasp_server.py, per
