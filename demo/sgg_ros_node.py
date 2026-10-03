@@ -411,7 +411,7 @@ def update_scene_graph(image, bboxes, rels):
                 node['confidence'] *= decay_factor
 
             if node['confidence'] < CONFIDENCE_REMOVE_THRESHOLD:
-                print(f"  ⚠️ '{node['label']}' sparito dalla scena — probabilmente preso dal robot.")
+                print(f"  ⚠️ '{node['label']}' rimosso dalla memoria: non più visto da circa {MEMORY_SECONDS_TARGET:.0f} s.")
                 to_remove.append(i)
 
     for i in sorted(to_remove, reverse=True):
