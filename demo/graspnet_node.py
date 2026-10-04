@@ -120,6 +120,15 @@ class GraspNetNode(Node):
         self.declare_parameter('min_grasp_score', 0.4)
         self.min_grasp_score = self.get_parameter('min_grasp_score').get_parameter_value().double_value
 
+        # Salvataggio di ogni richiesta (04/10/2026, demo/graspnet_records.py):
+        # immagine, profondita', prese del server e presa scelta, per la figura
+        # del Cap. 5. Avviene dopo la pubblicazione, quindi non ritarda il
+        # robot. save_dir vuoto = $LAB/graspnet o ~/lab_logs/<data>/graspnet.
+        self.declare_parameter('save_requests', True)
+        self.declare_parameter('save_dir', '')
+        self.save_requests = self.get_parameter('save_requests').get_parameter_value().bool_value
+        self.save_dir = self.get_parameter('save_dir').get_parameter_value().string_value
+
         # Costanti fisse di calibrazione, stesse usate in ET_node.cpp
         # (camera_to_tool0_quat, grasp_frame_to_tool0_quat) -- servono SOLO a
         # stimare quanto dovrebbe ruotare il polso per ciascuna presa
@@ -368,8 +377,8 @@ class GraspNetNode(Node):
         # segfault al primo trigger reale (conflitto NumPy 1.x/2.x), stesso
         # problema gia' risolto in sgg_ros_node.py.
         color_img = imgmsg_to_numpy_bgr8(self.last_color_frame)
-        depth_img = imgmsg_to_numpy_depth16(self.last_depth_frame)
-        depth_img = depth_img.astype('float32')
+        depth_raw = imgmsg_to_numpy_depth16(self.last_depth_frame)
+        depth_img = depth_raw.astype('float32')
 
         # --- 2. Estrazione intrinseci dalla CameraInfo ---
         # msg.k e' una matrice 3x3 appiattita in row-major:
@@ -425,12 +434,16 @@ class GraspNetNode(Node):
             self.get_logger().error(f'Chiamata al server GraspNet fallita: {exc}')
             return
 
+        record = (color_img, depth_raw, (fx, fy, cx, cy), bbox_with_margin, result)
+
         if not result.get('success'):
             self.get_logger().warn(f"GraspNet non ha prodotto un grasp valido: {result.get('reason')}")
+            self._save_request(*record, None)
             return
 
         grasp = self.select_grasp(result)
         if grasp is None:
+            self._save_request(*record, None)
             return
 
         # --- 4. Conversione rotation_matrix -> quaternione ---
@@ -483,6 +496,26 @@ class GraspNetNode(Node):
             f"quat[xyzw]=({quat[0]:.3f}, {quat[1]:.3f}, {quat[2]:.3f}, {quat[3]:.3f}), "
             f"rpy[deg]=({rpy_deg[0]:.1f}, {rpy_deg[1]:.1f}, {rpy_deg[2]:.1f}) in camera frame."
         )
+        self._save_request(*record, grasp)
+
+    def _save_request(self, color_img, depth_raw, intrinsics, bbox, result, chosen):
+        """Salva la richiesta su file (vedi demo/graspnet_records.py). Un
+        errore qui viene solo segnalato: non deve mai fermare il nodo."""
+        if not self.save_requests:
+            return
+        try:
+            try:
+                from demo.graspnet_records import save_request, default_save_dir
+            except ImportError:
+                from graspnet_records import save_request, default_save_dir
+            path = save_request(
+                self.save_dir or default_save_dir(), color_img, depth_raw, intrinsics, bbox,
+                self.last_target_points, result, chosen,
+                {'max_grasp_width': self.max_grasp_width, 'min_grasp_score': self.min_grasp_score,
+                 'target_radius': GRASP_TARGET_RADIUS_M})
+            self.get_logger().info(f'Richiesta GraspNet salvata in {path}')
+        except Exception as exc:
+            self.get_logger().warn(f'Salvataggio della richiesta GraspNet non riuscito: {exc}')
 
 
 def main(args=None):
