@@ -29,7 +29,19 @@ class SGG_ONNX_Model(SGG_Model):
         print(f"Loading ONNX model from {onnx_path} with {provider}...")
         self._fix_ld_library_path()
         try:
-            self.session = ort.InferenceSession(onnx_path, providers=[provider, 'CPUExecutionProvider'])
+            # Thread di onnxruntime (05/10/2026): sulla CPU del portatile SGG
+            # occupava circa 6 core su 12 e il driver del robot, senza priorita'
+            # real-time, perdeva la connessione. SGG_ORT_THREADS=N limita i
+            # thread dell'inferenza e spegne l'attesa attiva; senza la
+            # variabile resta il comportamento di prima.
+            so = ort.SessionOptions()
+            n_threads = int(os.environ.get('SGG_ORT_THREADS', '0'))
+            if n_threads > 0:
+                so.intra_op_num_threads = n_threads
+                so.inter_op_num_threads = 1
+                so.add_session_config_entry('session.intra_op.allow_spinning', '0')
+                print(f"onnxruntime: {n_threads} thread, attesa attiva spenta (SGG_ORT_THREADS)")
+            self.session = ort.InferenceSession(onnx_path, sess_options=so, providers=[provider, 'CPUExecutionProvider'])
             print(f"ONNX Session loaded with providers: {self.session.get_providers()}")
         except Exception as e:
             print(f"Failed to load ONNX session: {e}")
