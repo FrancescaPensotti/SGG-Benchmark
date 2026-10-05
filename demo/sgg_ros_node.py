@@ -574,6 +574,16 @@ class SGGNode(Node):
         # visti, SENZA pubblicare nulla -- il robot si comporta come negli
         # stadi A/B. Serve a vedere sui dati reali se le decisioni hanno senso
         # prima di dargli il controllo. Vedi demo/target_arbiter.py.
+        # Distanza minima valida della depth (05/10/2026): parametro per
+        # confrontare 0.25 m con valori piu' bassi; da vicino oggetti alti
+        # (bottiglia, bicchiere) restavano senza letture e la zona non
+        # scattava. Vedi la nota su MIN_VALID_DEPTH_M per il rischio sotto
+        # i 0.25 m (18/09).
+        global MIN_VALID_DEPTH_M
+        self.declare_parameter('min_valid_depth', MIN_VALID_DEPTH_M)
+        MIN_VALID_DEPTH_M = float(self.get_parameter('min_valid_depth').value)
+        if MIN_VALID_DEPTH_M != 0.25:
+            print(f"Distanza minima valida della depth: {MIN_VALID_DEPTH_M:.2f} m (default 0.25)")
         self.declare_parameter('arbiter_mode', 'off')
         self.arbiter_mode = self.get_parameter('arbiter_mode').get_parameter_value().string_value
         self.arbiter = None
