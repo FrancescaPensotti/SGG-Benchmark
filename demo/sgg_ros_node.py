@@ -551,9 +551,11 @@ class SGGNode(Node):
         self.true_colors = self.get_parameter('true_colors').get_parameter_value().bool_value
         # Etichette che non sono oggetti da afferrare (29/09/2026): la mano e il
         # corpo di chi prepara la scena entrano nel grafo. Esclusi dalla
-        # selezione automatica (Stadio B) e dall'arbitro.
+        # selezione automatica (Stadio B) e dall'arbitro. 'cap' aggiunto il
+        # 06/10/2026: il tappo e' una parte della bottiglia, ma il 05/10 era entrato
+        # nell'inventario e lo Stadio D lo aveva valutato come oggetto successivo.
         self.declare_parameter('non_object_labels',
-                               ['person', 'man', 'woman', 'hand', 'finger', 'arm', 'shirt', 'head', 'face'])
+                               ['person', 'man', 'woman', 'hand', 'finger', 'arm', 'shirt', 'head', 'face', 'cap'])
         self.non_object_labels = set(self.get_parameter('non_object_labels').value)
         # Riquadri arancioni "(memoria)" nella finestra: spenti di default dal
         # 29/09/2026 (su richiesta, tolgono leggibilita'); gli oggetti restano
