@@ -27,6 +27,10 @@
         "reason": "Una bottiglia di condimento (es. olio, aceto, salsa) o un ingrediente liquido (es. latte, acqua) viene tipicamente versato in una ciotola per preparare cibi o insalate.",
         "score": 1.0
       },
+      "box": {
+        "reason": "Una bottiglia può essere riposta o trasportata all'interno di una scatola.",
+        "score": 0.75
+      },
       "cup": {
         "reason": "Si versa il contenuto di una bottiglia in una tazza/bicchiere.",
         "score": 1.0
@@ -45,12 +49,34 @@
         "reason": "Una bottiglia può essere usata per versare liquidi (es. latte, acqua) nella ciotola.",
         "score": 1.0
       },
+      "box": {
+        "reason": "Una ciotola viene spesso usata per contenere alimenti provenienti da una scatola (es. cereali) o per riporre alimenti in una scatola.",
+        "score": 0.9
+      },
       "cup": {
         "reason": "Una tazza e una ciotola sono entrambi contenitori; possono essere usate insieme in un pasto o per trasferire piccole quantità.",
         "score": 0.5
       },
       "plate": {
         "reason": "Piatto e ciotola sono spesso usati insieme per servire un pasto o come parte di un set da tavola.",
+        "score": 1.0
+      }
+    },
+    "box": {
+      "bottle": {
+        "reason": "Una scatola è spesso usata per contenere, trasportare o riporre bottiglie.",
+        "score": 1.0
+      },
+      "bowl": {
+        "reason": "Una scatola è spesso usata per contenere, trasportare o riporre ciotole.",
+        "score": 1.0
+      },
+      "cup": {
+        "reason": "Una scatola è spesso usata per contenere, trasportare o riporre tazze.",
+        "score": 1.0
+      },
+      "plate": {
+        "reason": "Una scatola è spesso usata per contenere, trasportare o riporre piatti, ad esempio durante un trasloco.",
         "score": 1.0
       }
     },
@@ -65,6 +91,10 @@
       },
       "bowl": {
         "reason": "Entrambi contenitori per cibo/bevande, spesso presenti allo stesso pasto (es. colazione), ma raramente con interazione diretta di versamento.",
+        "score": 0.5
+      },
+      "box": {
+        "reason": "Una scatola potrebbe contenere un liquido da versare nella tazza (es. succo di frutta) o ingredienti per la tazza (es. bustine di tè, zucchero). Potrebbe anche essere usata per riporre la tazza.",
         "score": 0.5
       },
       "plate": {
@@ -83,6 +113,10 @@
       },
       "bowl": {
         "reason": "Piatto e ciotola sono entrambi stoviglie e sono spesso usati insieme durante un pasto (es. ciotola per zuppa, piatto per portata principale) o per apparecchiare.",
+        "score": 1.0
+      },
+      "box": {
+        "reason": "I piatti possono essere riposti in scatole per conservazione o trasporto, oppure una scatola può contenere cibo da servire su un piatto.",
         "score": 1.0
       },
       "cup": {
