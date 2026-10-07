@@ -91,7 +91,10 @@ BLACKLIST_OBJECTS = {
     # senza queste due, lo sfondo entrava tra i candidati dello Stadio B
     # (selezione automatica a un solo oggetto), che non scattava mai perche'
     # non c'era mai un solo candidato.
-    'counter', 'sink'
+    'counter', 'sink',
+    # 07/10/2026: con la vista inclinata il piano del banco e' riconosciuto
+    # anche come "board" e l'arbitro lo sceglieva come oggetto.
+    'board'
 }
 
 # ── Mappe relazioni VG150 → MomaGraph ───────────────────────
