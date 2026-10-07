@@ -521,6 +521,13 @@ class SGGNode(Node):
         # riaperta, altrimenti riselezionerebbe l'oggetto appena preso (ancora
         # in vista) e i suoi messaggi terrebbero ET_node nella zona di grasp.
         self._holding_object = False
+        # Arbitro in pausa dalla riapertura della pinza fino a `x` (07/10/2026):
+        # il ritorno alla partenza fra una prova e l'altra non deve essere
+        # letto come un movimento verso un oggetto. `x` alla partenza e' il via
+        # della prova successiva. Non riguarda il suggerimento dello Stadio D,
+        # che alla riapertura si attiva senza passare dall'arbitro.
+        self._arbiter_paused = False
+        self._gripper_occupied_prev = False
         self._last_target_publish_time = 0.0
         # Nomi degli oggetti visti in modo stabile dall'avvio, senza posizione
         # e senza decadimento: la scelta semantica ha bisogno solo dei nomi, e
@@ -1060,6 +1067,9 @@ class SGGNode(Node):
 
     def _arbiter_shadow_step(self):
         """Un ciclo dell'arbitro sugli oggetti visti ora: solo log."""
+        if self._arbiter_paused:
+            self._arbiter_print("in pausa fino a x (pinza riaperta, ritorno alla partenza).")
+            return
         with self._pose_lock:
             ee_pos = None if self._ee_pos is None else self._ee_pos.copy()
             ee_quat = None if self._ee_quat is None else self._ee_quat.copy()
@@ -1231,9 +1241,15 @@ class SGGNode(Node):
             print("  Zona di grasp bloccata da ET_node: nessuna scelta automatica finche' il polso non sale.")
 
     def gripper_occupied_callback(self, msg: Bool):
+        was_occupied = self._gripper_occupied_prev
+        self._gripper_occupied_prev = msg.data
+        if not msg.data and was_occupied and self.arbiter is not None and not self._arbiter_paused:
+            self._arbiter_paused = True
+            print(f"  [arbitro {self.arbiter_mode}] in pausa: torna alla partenza e premi x per la prova successiva.")
         if not msg.data and self._holding_object:
             self._holding_object = False
-            print("  Pinza riaperta: selezione automatica di nuovo attiva.")
+            if self.arbiter is None:
+                print("  Pinza riaperta: selezione automatica di nuovo attiva.")
         if msg.data or self.suggested_label is None:
             return
         self._suggestion_released = True
@@ -1493,7 +1509,10 @@ class SGGNode(Node):
                         # che fa avanzare l'arbitro: stesso lock del grafo.
                         with self.lock:
                             self.arbiter.reset()
-                        print(f"  [arbitro {self.arbiter_mode}] scelta azzerata.")
+                            was_paused = self._arbiter_paused
+                            self._arbiter_paused = False
+                        print(f"  [arbitro {self.arbiter_mode}] scelta azzerata"
+                              + (", pausa finita: via alla prova." if was_paused else "."))
                     if self.suggested_label is not None:
                         print(f"  → Annullato il suggerimento: '{self.suggested_label}'")
                         self.suggested_label = None
