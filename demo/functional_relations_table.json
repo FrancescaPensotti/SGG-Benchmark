@@ -16,6 +16,10 @@
       "plate": {
         "reason": "Una banana può essere servita o mangiata su un piatto, specialmente se tagliata.",
         "score": 1.0
+      },
+      "seat": {
+        "reason": "Un sedile è un luogo comune dove si può mangiare una banana, ma non c'è un'interazione diretta o manipolazione congiunta tra i due oggetti.",
+        "score": 0.5
       }
     },
     "bottle": {
