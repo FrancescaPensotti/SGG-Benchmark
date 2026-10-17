@@ -120,6 +120,18 @@ class GraspNetNode(Node):
         self.declare_parameter('min_grasp_score', 0.4)
         self.min_grasp_score = self.get_parameter('min_grasp_score').get_parameter_value().double_value
 
+        # Inclinazione massima preferita dell'avvicinamento (17/10/2026), in
+        # gradi rispetto all'asse ottico della camera, cioe' all'asse attuale
+        # della pinza (camera_to_tool0 e' quasi l'identita'): con la camera
+        # dritta del caso 2 e' l'inclinazione rispetto alla verticale. L'08/10
+        # tutte le prese scelte erano inclinate di 22-41 gradi, anche quando
+        # c'erano candidate a 5-10 gradi; inclinata, la pinza abbassa da un
+        # lato il corpo della pinza e della camera. Fra le prese sopra soglia
+        # si preferiscono quelle entro questo angolo; se non ce n'e' nessuna,
+        # si sceglie fra tutte come prima. 0 = nessuna preferenza.
+        self.declare_parameter('max_approach_tilt_deg', 0.0)
+        self.max_approach_tilt_deg = self.get_parameter('max_approach_tilt_deg').get_parameter_value().double_value
+
         # Salvataggio di ogni richiesta (04/10/2026, demo/graspnet_records.py):
         # immagine, profondita', prese del server e presa scelta, per la figura
         # del Cap. 5. Avviene dopo la pubblicazione, quindi non ritarda il
@@ -225,6 +237,14 @@ class GraspNetNode(Node):
         delta = self._camera_to_tool0 * q_cam * self._grasp_frame_to_tool0
         return abs(delta.magnitude()) * 180.0 / np.pi
 
+    @staticmethod
+    def _approach_tilt_deg(rotation_matrix):
+        """Angolo (gradi) fra la direzione di avvicinamento della presa (asse
+        X del frame di grasp di GraspNet) e l'asse ottico della camera; non
+        cambia per il gemello ruotato di 180 gradi attorno all'avvicinamento."""
+        approach = np.array(rotation_matrix)[:, 0]
+        return float(np.degrees(np.arccos(min(1.0, abs(approach[2]) / np.linalg.norm(approach)))))
+
     def _best_equivalent_rotation(self, rotation_matrix):
         """Una presa a due dita simmetriche ha un gemello meccanicamente
         identico, ruotato di 180 gradi attorno al proprio asse di
@@ -313,6 +333,18 @@ class GraspNetNode(Node):
         self.get_logger().info(
             f"{len(quality)} presa/e su {len(grasps)} sopra la soglia di qualita' ({self.min_grasp_score:.2f}).")
 
+        if self.max_approach_tilt_deg > 0.0:
+            upright = [g for g in quality if self._approach_tilt_deg(g['rotation_matrix']) <= self.max_approach_tilt_deg]
+            if upright:
+                self.get_logger().info(
+                    f"{len(upright)} presa/e su {len(quality)} entro {self.max_approach_tilt_deg:.0f} deg dall'asse della pinza.")
+                quality = upright
+            else:
+                self.get_logger().warn(
+                    f"Nessuna presa sopra soglia entro {self.max_approach_tilt_deg:.0f} deg dall'asse della pinza "
+                    f"(la meno inclinata a {min(self._approach_tilt_deg(g['rotation_matrix']) for g in quality):.0f} deg): "
+                    f"scelgo fra tutte le {len(quality)}.")
+
         # Per ciascuna candidata, la rotazione stimata e' quella del gemello
         # (dritto o capovolto di 180 gradi attorno all'approccio) piu' comodo
         # -- vedi _best_equivalent_rotation().
@@ -321,13 +353,14 @@ class GraspNetNode(Node):
         for g in ranked[:3]:
             self.get_logger().info(
                 f"  candidata: score={g['score']:.3f}, larghezza={g.get('width', float('nan')):.3f} m, "
-                f"rotazione stimata={equivalents[id(g)][1]:.1f} deg")
+                f"rotazione stimata={equivalents[id(g)][1]:.1f} deg, "
+                f"inclinazione={self._approach_tilt_deg(g['rotation_matrix']):.0f} deg")
         best = ranked[0]
         best_matrix, best_angle = equivalents[id(best)]
         best = dict(best, rotation_matrix=best_matrix)
         self.get_logger().info(
             f"Presa scelta: score={best['score']:.3f}, larghezza={best.get('width', float('nan')):.3f} m, "
-            f"rotazione stimata={best_angle:.1f} deg "
+            f"rotazione stimata={best_angle:.1f} deg, inclinazione={self._approach_tilt_deg(best_matrix):.0f} deg "
             f"(sopra soglia qualita' {self.min_grasp_score:.2f}, tra {len(quality)} candidate).")
         self._log_offset_from_target(best)
         return best
