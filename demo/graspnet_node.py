@@ -106,8 +106,12 @@ class GraspNetNode(Node):
         self.bbox_margin_m = self.get_parameter('bbox_margin_m').get_parameter_value().double_value
         # Apertura massima utilizzabile: con le dita montate il 23/09/2026 la
         # Hand-E apre 7.5 cm tra le dita (misura interna). Prima, con le dita
-        # vecchie, 5 cm con 5 mm di margine (0.045). Default dal 02/10.
-        self.declare_parameter('max_grasp_width', 0.075)
+        # vecchie, 5 cm con 5 mm di margine (0.045). Default 0.075 dal 02/10;
+        # 0.10 dal 19/10/2026: GraspNet sovrastima la larghezza di bottle e
+        # banana (8-10 cm, ma sono piu' strette di 7.5 cm ovunque) e il filtro
+        # a 7.5 cm scartava le prese quasi verticali. La larghezza serve solo
+        # a filtrare: alla pinza si comanda sempre la chiusura completa.
+        self.declare_parameter('max_grasp_width', 0.10)
         self.max_grasp_width = self.get_parameter('max_grasp_width').get_parameter_value().double_value
 
         # Soglia minima di punteggio GraspNet: tra le prese sopra questa
@@ -128,8 +132,10 @@ class GraspNetNode(Node):
         # c'erano candidate a 5-10 gradi; inclinata, la pinza abbassa da un
         # lato il corpo della pinza e della camera. Fra le prese sopra soglia
         # si preferiscono quelle entro questo angolo; se non ce n'e' nessuna,
-        # si sceglie fra tutte come prima. 0 = nessuna preferenza.
-        self.declare_parameter('max_approach_tilt_deg', 0.0)
+        # si sceglie fra tutte come prima. 0 = nessuna preferenza. Default 20
+        # dal 19/10/2026: con gli oggetti ruotati prese inclinate di 5-27 gradi,
+        # 9 catene su 9 riuscite in C e nello Stadio D, nessuna collisione.
+        self.declare_parameter('max_approach_tilt_deg', 20.0)
         self.max_approach_tilt_deg = self.get_parameter('max_approach_tilt_deg').get_parameter_value().double_value
 
         # Salvataggio di ogni richiesta (04/10/2026, demo/graspnet_records.py):
