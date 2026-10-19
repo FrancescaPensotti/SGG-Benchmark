@@ -134,7 +134,7 @@ class GraspNetNode(Node):
         # si preferiscono quelle entro questo angolo; se non ce n'e' nessuna,
         # si sceglie fra tutte come prima. 0 = nessuna preferenza. Default 20
         # dal 19/10/2026: con gli oggetti ruotati prese inclinate di 5-27 gradi,
-        # 9 catene su 9 riuscite in C e nello Stadio D, nessuna collisione.
+        # 10 catene su 10 riuscite (verifica, C, Stadio D), nessuna collisione.
         self.declare_parameter('max_approach_tilt_deg', 20.0)
         self.max_approach_tilt_deg = self.get_parameter('max_approach_tilt_deg').get_parameter_value().double_value
 
